@@ -1,18 +1,60 @@
-use std::io::Write;
-use std::path::PathBuf;
-use std::{env, time::Duration};
-// use std::process::Command;
-use tokio::process::Command;
-
+use crypto::rust::hash::blake2b256::Blake2b256;
+use hex::ToHex;
 use models::rhoapi::Par;
 use serde_json::Value;
-use tempfile::NamedTempFile;
+use std::fs::{create_dir_all, remove_dir_all, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::{env, time::Duration};
+use tokio::process::Command;
 
 use crate::rust::interpreter::rho_type::{
     RhoBoolean, RhoList, RhoMap, RhoNil, RhoNumber, RhoString,
 };
 
 use super::errors::InterpreterError;
+
+// TODO: Place `petta_sessions` in location where f1r3node state is persisted.
+// A PettaSession holds the MeTTa program to execute and any continuations created
+// during its execution. It must be cleaned up whenever execution succeeds or is
+// aborted due to an `InterpreterError`. It must outlive other problems such as
+// power outages or the f1r3node process being killed.
+struct PettaSession {
+    path: PathBuf,
+}
+
+impl PettaSession {
+    fn create(metta_source: &str) -> Result<Self, InterpreterError> {
+        let hash: String = Blake2b256::hash(Vec::from(metta_source.as_bytes())).encode_hex_upper();
+        let session_path: PathBuf = {
+            let petta_sessions_path = Path::new("petta_sessions");
+            [petta_sessions_path, Path::new(hash.as_str())]
+                .iter()
+                .collect()
+        };
+        let program_path: PathBuf = [session_path.as_path(), Path::new("program.metta")]
+            .iter()
+            .collect();
+        create_dir_all(session_path.as_path())?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(program_path)?;
+        file.write_all(metta_source.as_bytes())?;
+        Ok(Self { path: session_path })
+    }
+}
+
+impl Drop for PettaSession {
+    fn drop(&mut self) {
+        remove_dir_all(&self.path).unwrap_or_else(|e| {
+            println!(
+                "Failed to delete session folder {:#?}. Error {:#?}",
+                self.path, e
+            )
+        });
+    }
+}
 
 /// Executes MeTTa code through the PeTTa (SWI-Prolog) interpreter and returns the result as a Rholang Par.
 ///
@@ -82,20 +124,9 @@ use super::errors::InterpreterError;
 ///
 /// - [`system_processes::swipl_execute_petta`] - System process wrapper for Rholang contracts
 /// - [`value_to_par`] - JSON to Par conversion logic
-pub async fn petta_execute(metta_code: &str) -> Result<Par, InterpreterError> {
-    // Write the MeTTa code to a temp file
-    let mut metta_file = NamedTempFile::new()
-        .map_err(|_| InterpreterError::SwiplError("Can't open temp file".into()))?;
-    metta_file
-        .write(metta_code.as_bytes())
-        .map_err(|_| InterpreterError::SwiplError("Can't write MeTTa code to temp file".into()))?;
 
-    let metta_file_path = metta_file
-        .path()
-        .to_str()
-        .ok_or(InterpreterError::SwiplError(
-            "Can't convert metta_file path to string".into(),
-        ))?;
+pub async fn petta_execute(metta_code: &str) -> Result<Par, InterpreterError> {
+    let session = PettaSession::create(metta_code)?;
 
     // Get the path to PeTTa
     let metta_module_path: PathBuf = {
@@ -109,9 +140,11 @@ pub async fn petta_execute(metta_code: &str) -> Result<Par, InterpreterError> {
 
     let goal = format!(
         r#"assertz(silent(true)),
-           load_metta_file('{metta_file_path}', Results),
+           working_directory(_, '{session_path}'),
+           load_metta_file('program.metta', Results),
            use_module(library(json)),
-           json_write_dict(current_output, #{{results:Results}})."#
+           json_write_dict(current_output, #{{results:Results}})."#,
+        session_path = session.path.display()
     );
 
     // TODO: Make this a configuration parameter
