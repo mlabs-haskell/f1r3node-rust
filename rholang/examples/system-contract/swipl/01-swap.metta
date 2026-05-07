@@ -1,5 +1,9 @@
+(p 1 2)
+(p x y)
+
 (= (swap (Pair $x $y)) (Pair $y $x))
 
-!(swap (Pair 1 2))
-
-!(swap (Pair x y))
+; Mandatory entry point with dummy parameter (unused)
+(= (main $_)
+   (match &self (p $a $b) (swap (Pair $a $b)))
+)

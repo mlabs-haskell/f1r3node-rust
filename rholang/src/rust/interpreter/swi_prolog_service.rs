@@ -2,7 +2,7 @@ use crypto::rust::hash::blake2b256::Blake2b256;
 use hex::ToHex;
 use models::rhoapi::Par;
 use serde_json::Value;
-use std::fs::{create_dir_all, remove_dir_all, OpenOptions};
+use std::fs::{create_dir_all, remove_dir_all, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::{env, time::Duration};
@@ -26,22 +26,27 @@ struct PettaSession {
 impl PettaSession {
     fn create(metta_source: &str) -> Result<Self, InterpreterError> {
         let hash: String = Blake2b256::hash(Vec::from(metta_source.as_bytes())).encode_hex_upper();
-        let session_path: PathBuf = {
-            let petta_sessions_path = Path::new("petta_sessions");
-            [petta_sessions_path, Path::new(hash.as_str())]
-                .iter()
-                .collect()
-        };
-        let program_path: PathBuf = [session_path.as_path(), Path::new("program.metta")]
-            .iter()
-            .collect();
-        create_dir_all(session_path.as_path())?;
-        let mut file = OpenOptions::new()
+        let petta_sessions_path = Path::new("petta_sessions");
+        let this_session_path = petta_sessions_path.join(Path::new(hash.as_str()));
+        let this_program_path = this_session_path.join(Path::new("program.metta"));
+        // Create sessions dir
+        create_dir_all(&this_session_path)?;
+        // Copy wrapped program into session dir
+        let file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(program_path)?;
-        file.write_all(metta_source.as_bytes())?;
-        Ok(Self { path: session_path })
+            .open(this_program_path)?;
+        write_metta_program(metta_source, file)?;
+        // Symlink repos folder. `git-import!` in MeTTa downloads repositories
+        // into the current working directory, but this will happen constantly
+        // because session folders are transient.
+        // TODO: Add a standard location for downloaded repositories.
+        let repos_path = Path::new("../../repos");
+        let repos_symlink = this_session_path.join(Path::new("repos"));
+        std::os::unix::fs::symlink(repos_path, repos_symlink)?;
+        Ok(Self {
+            path: this_session_path,
+        })
     }
 }
 
@@ -138,9 +143,16 @@ pub async fn petta_execute(metta_code: &str) -> Result<Par, InterpreterError> {
         return Err(InterpreterError::SwiplError("Can't find PeTTa.".into()));
     }
 
+    // We need to do some manual setup before running the MeTTa program. Some of
+    // these steps are done by the main entry point of the PeTTa program, but others
+    // are not.
+    //
+    // We also run some additional code after the evaluation of the MeTTa program
+    // to get useful output that we can parse.
     let goal = format!(
         r#"assertz(silent(true)),
            working_directory(_, '{session_path}'),
+           assertz(working_dir('{session_path}')),
            load_metta_file('program.metta', Results),
            use_module(library(json)),
            json_write_dict(current_output, #{{results:Results}})."#,
@@ -280,6 +292,29 @@ fn value_to_par(v: Value) -> Result<Par, InterpreterError> {
         }
     }
 }
+
+// This function wraps the given MeTTa program to support snapshots and persists
+// the wrapped version of the program to the given file.
+fn write_metta_program(metta_code: &str, mut file: File) -> Result<(), std::io::Error> {
+    let prelude = r#"!(progn
+    (import! &self (library lib_import))
+    (call (git-import! "https://github.com/rmgaray/petta_lib_snapshot.git"))
+    (import! &self (library lib_snapshot))
+    (empty)
+)
+"#;
+    let main_wrapper = r#"
+!(progn
+     (InjectSnapshots)
+     (CallWithSnapshotInterval (main dummy) 200000)
+)
+"#;
+    file.write_all(prelude.as_bytes())?;
+    file.write_all(metta_code.as_bytes())?;
+    file.write_all(main_wrapper.as_bytes())
+}
+
+///// TESTS /////
 
 #[cfg(test)]
 mod tests {
