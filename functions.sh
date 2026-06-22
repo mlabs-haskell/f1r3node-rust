@@ -107,7 +107,7 @@ function generate-executable-bind() {
 }
 
 # Generates --ro-bind options for all executables and their dependencies
-function generate-binds() {
+function generate-binds-exes() {
     local BINDS=""
     
     # First, generate executable binds
@@ -122,6 +122,38 @@ function generate-binds() {
     for PROGRAM in $*; do
         for LIB in $(all-libraries ${PROGRAM}); do
             UNIQUE_LIBS[$LIB]=1
+        done
+    done
+
+    # Generate binds for all unique libraries
+    for LIB in "${!UNIQUE_LIBS[@]}"; do
+        local LIB_BASENAME=$(basename "${LIB}")
+
+        if [[ "$LIB_BASENAME" == ld-linux* ]]; then
+            # Bind the original unpatched linker
+            BINDS="${BINDS} --ro-bind ${LIB} /lib/${LIB_BASENAME}"
+        else
+            # Patch and bind other libraries
+            local PATCHED_LIB=$(patched-library "${LIB}")
+            BINDS="${BINDS} --ro-bind ${PATCHED_LIB} /lib/${LIB_BASENAME}"
+        fi
+    done
+    
+    echo ${BINDS}
+}
+
+# Generates --ro-bind options for all libraries and their dependencies
+function generate-binds-libs() {
+    local BINDS=""
+    
+    # Generate library binds (with deduplication across libraries)
+    local ALL_LIBS_COLLECTED=()
+    declare -A UNIQUE_LIBS
+    
+    for LIB in $*; do
+        UNIQUE_LIBS[$LIB]=1
+        for LIBDEP in $(collect-all-libraries ${LIB}); do
+            UNIQUE_LIBS[$LIBDEP]=1
         done
     done
 
