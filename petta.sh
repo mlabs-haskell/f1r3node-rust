@@ -4,11 +4,10 @@ set -euo pipefail
 source ./functions.sh
 
 # Programs to run in the sandbox
-PROGRAMS="swipl bash ls ldd sh"
+PROGRAMS="swipl"
 
 # Find out where the swipl "home dir" is to mount it
 SWIPL_HOME_DIR=$(swipl --home)
-
 
 # Options for re-creating the swipl home under sandbox. We can't just bind the
 # whole directory because we need to create the symlink
@@ -43,11 +42,12 @@ PROGRAM_FILE=$1
 # Session path (simply the CWD of swipl)
 SESSION_PATH="/tmp/session"
 # Goal
-GOAL="assertz(silent(true)), working_directory(_, ${SESSION_PATH}), assertz(working_dir(${SESSION_PATH})), load_metta_file('program.metta', Results), use_module(library(json)), json_write_dict(current_output, #{results:Results})."
+GOAL="assertz(silent(true)), working_directory(_, '${SESSION_PATH}'), assertz(working_dir('${SESSION_PATH}')), load_metta_file('program.metta', Results), use_module(library(json)), json_write_dict(current_output, #{results:Results})."
 
 (exec bwrap \
       --dir /bin \
       --dir /usr \
+      --dir /usr/share \
       --dir /usr/bin \
       --dir /lib \
       --dir /tmp \
@@ -57,6 +57,8 @@ GOAL="assertz(silent(true)), working_directory(_, ${SESSION_PATH}), assertz(work
       ${SWIPL_HOME_BINDS} \
       --ro-bind ${PETTA_DIR} /lib/PeTTa \
       --ro-bind ${PROGRAM_FILE} /tmp/session/program.metta \
+      --ro-bind ${TERMINFO} /lib/terminal/terminfo \
+      --ro-bind ${TERMINFO_DIRS} /usr/share/terminfo \
       $(generate-binds-exes ${PROGRAMS}) \
       $(generate-binds-libs ${SWIPL_LIBS}) \
       --symlink ../tmp var/tmp \
@@ -73,11 +75,16 @@ GOAL="assertz(silent(true)), working_directory(_, ${SESSION_PATH}), assertz(work
       --setenv XDG_RUNTIME_DIR "/run/user/`id -u`" \
       --setenv PATH "/usr/bin" \
       --setenv SWI_HOME_DIR "/lib/swipl" \
+      --setenv LANG "en_US.UTF-8" \
+      --setenv TERM "${TERM}" \
+      --setenv TERMINFO "/lib/terminal/terminfo" \
+      --setenv TERMINFO_DIRS "/usr/share/terminfo" \
       --file 11 /etc/passwd \
       --file 12 /etc/group \
-    swipl -s /lib/PeTTa/src/main.pl -g "${GOAL}" -t halt \
+    swipl -s /lib/PeTTa/src/metta.pl -g "${GOAL}" -t halt \
     11< <(getent passwd $UID 65534) \
     12< <(getent group $(id -g) 65534) \
 )
     # swipl \
     # bash \
+    # swipl -s /lib/PeTTa/src/main.pl -g "${GOAL}" -t halt \
