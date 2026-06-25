@@ -35,14 +35,15 @@ SWIPL_LIBS=$(find ${SWIPL_HOME_DIR}/lib/x86_64-linux -type f | grep -v libjpl)
 
 # Location of PeTTa interpreter
 PETTA_DIR=./PeTTa
-# Location of Python3 libraries
-PYTHON3_LIBDIR=$(echo -e "import sysconfig\nprint(sysconfig.get_config_var('LIBDIR'))" | python3)
 # Metta program to run
 PROGRAM_FILE=$1
 # Session path (simply the CWD of swipl)
 SESSION_PATH="/tmp/session"
 # Goal
-GOAL="assertz(silent(true)), working_directory(_, '${SESSION_PATH}'), assertz(working_dir('${SESSION_PATH}')), load_metta_file('program.metta', Results), use_module(library(json)), json_write_dict(current_output, #{results:Results})."
+GOAL="assertz(silent(true)), assertz(working_dir('${SESSION_PATH}')), load_metta_file('program.metta', Results), use_module(library(json)), json_write_dict(current_output, #{results:Results})."
+
+### SECCOMP FILTERS ###
+SECCOMP_SYSCALL_ALLOW="read:write:open:lseek:mprotect:munmap:brk:rt_sigaction:rt_sigprocmask:access:madvise:getpid:exit:fcntl:getcwd:readlink:sigaltstack:prctl:futex:sched_getaffinity:getdents64:clock_gettime:exit_group:set_robust_list:prlimit64:getrandom:rseq:clone3:openat:fstat:newfstatat:mmap:close:ioctl:rt_sigreturn:mkdir:getuid:getgid:geteuid:getegid:gettid:tgkill"
 
 (exec bwrap \
       --dir /bin \
@@ -61,6 +62,7 @@ GOAL="assertz(silent(true)), working_directory(_, '${SESSION_PATH}'), assertz(wo
       --ro-bind ${TERMINFO_DIRS} /usr/share/terminfo \
       $(generate-binds-exes ${PROGRAMS}) \
       $(generate-binds-libs ${SWIPL_LIBS}) \
+      $(generate-binds-libs ${SANDBOX_LIB_PATH}) \
       --symlink ../tmp var/tmp \
       --symlink /usr/bin/sh /bin/sh \
       --symlink /lib /lib/swipl/lib/x86_64-linux \
@@ -79,12 +81,11 @@ GOAL="assertz(silent(true)), working_directory(_, '${SESSION_PATH}'), assertz(wo
       --setenv TERM "${TERM}" \
       --setenv TERMINFO "/lib/terminal/terminfo" \
       --setenv TERMINFO_DIRS "/usr/share/terminfo" \
+      --setenv LD_PRELOAD "/lib/libsandbox.so" \
+      --setenv SECCOMP_SYSCALL_ALLOW "${SECCOMP_SYSCALL_ALLOW}" \
       --file 11 /etc/passwd \
       --file 12 /etc/group \
     swipl -s /lib/PeTTa/src/metta.pl -g "${GOAL}" -t halt \
     11< <(getent passwd $UID 65534) \
     12< <(getent group $(id -g) 65534) \
 )
-    # swipl \
-    # bash \
-    # swipl -s /lib/PeTTa/src/main.pl -g "${GOAL}" -t halt \
