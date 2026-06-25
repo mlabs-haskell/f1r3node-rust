@@ -28,7 +28,6 @@ function linker()
 # Patches a shared library to use /lib for RPATH
 function patched-library() {
     local LIBRARY_PATH=$1
-    local CACHE_DIR="${HOME}/.cache/bwrap-patched-libs"
     local LIBRARY_HASH=$(sha256sum "${LIBRARY_PATH}" | cut -d' ' -f1)
     local LIBRARY_NAME=$(basename "${LIBRARY_PATH}")
     local CACHED_LIBRARY="${CACHE_DIR}/${LIBRARY_NAME}-${LIBRARY_HASH}"
