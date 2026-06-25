@@ -44,7 +44,7 @@ source ./functions.sh
 # * The libsandbox.so library, which lets us conveniently apply seccomp filters.
 
 # Programs to run in the sandbox
-PROGRAMS="swipl"
+PROGRAMS="swipl bash ls"
 
 if [ ! -f ${CACHE_DIR}/cached_programs_binds ]; then
     PROGRAMS_BINDS=$(generate-binds-exes ${PROGRAMS})
@@ -135,6 +135,7 @@ SECCOMP_SYSCALL_ALLOW="read:write:open:lseek:mprotect:munmap:brk:rt_sigaction:rt
       ${SWIPL_LIBS_BINDS} \
       ${SANDBOX_LIB_BINDS} \
       --symlink ../tmp var/tmp \
+      --symlink /lib/PeTTa/lib /tmp/lib \
       --symlink /usr/bin/sh /bin/sh \
       --symlink /lib /lib/swipl/lib/x86_64-linux \
       --proc /proc \
