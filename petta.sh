@@ -5,11 +5,13 @@ set -euo pipefail
 # 
 # Make sure the following programs are available in the PATH:
 # * swipl
+# * python3
 # Make sure the following variables are defined:
 # * PETTA_DIR: path to PeTTa (the top folder in the repository)
 # * SANDBOX_LIB_PATH: path to the libsandbox.so library.
 # * CACHE_DIR: this location is where patched libraries will be placed in the
 #   host system before binding them inside the bubblewrap sandbox. 
+# * PYTHONHOME: the 
 # 
 # The flake.nix under the nix/ directory provides a development shell with all
 # the needed dependencies.
@@ -44,7 +46,7 @@ source ./functions.sh
 # * The libsandbox.so library, which lets us conveniently apply seccomp filters.
 
 # Programs to run in the sandbox
-PROGRAMS="swipl bash ls"
+PROGRAMS="swipl bash ls python3"
 
 if [ ! -f ${CACHE_DIR}/cached_programs_binds ]; then
     PROGRAMS_BINDS=$(generate-binds-exes ${PROGRAMS})
@@ -52,6 +54,10 @@ else
     PROGRAMS_BINDS=$(<${CACHE_DIR}/cached_programs_binds)
     echo "${PROGRAMS_BINDS}" >${CACHE_DIR}/cached_programs_binds
 fi
+
+# Options for adding the python3 /lib directory
+PYTHONHOME=$(python3 -c "import sys; print(' '.join(sys.path).strip())" | sed -rn 's/[ ]*([^ ]+)\/lib\/[^ ]*/\1\n/pg' | uniq)
+PYTHON_HOME_BINDS="--ro-bind ${PYTHONHOME} /lib/python"
 
 # Options for re-creating the swipl home inside the  sandbox. We can't just
 # bind the whole directory because we need to create the symlink
@@ -134,8 +140,10 @@ SECCOMP_SYSCALL_ALLOW="read:write:open:lseek:mprotect:munmap:brk:rt_sigaction:rt
       ${PROGRAMS_BINDS} \
       ${SWIPL_LIBS_BINDS} \
       ${SANDBOX_LIB_BINDS} \
+      ${PYTHON_HOME_BINDS} \
       --symlink ../tmp var/tmp \
       --symlink /lib/PeTTa/lib /tmp/lib \
+      --symlink /lib/PeTTa/lib /tmp/session/lib \
       --symlink /usr/bin/sh /bin/sh \
       --symlink /lib /lib/swipl/lib/x86_64-linux \
       --proc /proc \
@@ -155,6 +163,7 @@ SECCOMP_SYSCALL_ALLOW="read:write:open:lseek:mprotect:munmap:brk:rt_sigaction:rt
       --setenv TERMINFO_DIRS "/usr/share/terminfo" \
       --setenv LD_PRELOAD "/lib/libsandbox.so" \
       --setenv SECCOMP_SYSCALL_ALLOW "${SECCOMP_SYSCALL_ALLOW}" \
+      --setenv PYTHONHOME "/lib/python" \
       --file 11 /etc/passwd \
       --file 12 /etc/group \
     swipl --stack_limit=8g -q -s /lib/PeTTa/src/metta.pl -g "${GOAL}" -t halt \
