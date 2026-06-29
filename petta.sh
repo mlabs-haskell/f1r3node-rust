@@ -118,7 +118,7 @@ else
 fi
 
 # Taken from an audit of syscalls while running the entire PeTTa test suite
-SECCOMP_SYSCALL_ALLOW="read:write:open:lseek:mprotect:munmap:brk:rt_sigaction:rt_sigprocmask:access:madvise:getpid:exit:fcntl:getcwd:readlink:sigaltstack:prctl:futex:sched_getaffinity:getdents64:clock_gettime:exit_group:set_robust_list:prlimit64:getrandom:rseq:clone3:openat:fstat:newfstatat:mmap:close:ioctl:rt_sigreturn:mkdir:getuid:getgid:geteuid:getegid:gettid:tgkill"
+SECCOMP_SYSCALL_ALLOW="read:write:open:lseek:mprotect:munmap:brk:rt_sigaction:rt_sigprocmask:access:madvise:getpid:exit:fcntl:getcwd:readlink:sigaltstack:prctl:futex:sched_getaffinity:getdents64:clock_gettime:exit_group:set_robust_list:prlimit64:getrandom:rseq:clone3:openat:fstat:newfstatat:mmap:close:ioctl:rt_sigreturn:mkdir:getuid:getgid:geteuid:getegid:gettid:tgkill:socket:connect"
 
 ### BUBBLEWRAP ###
 
