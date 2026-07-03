@@ -1,4 +1,5 @@
 use std::env;
+use std::fs::{remove_file, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,7 +19,8 @@ use crate::rust::interpreter::rho_type::{
 /// # Overview
 ///
 /// This function provides low-level access to the PeTTa interpreter, which
-/// provides MeTTa execution with SWI-Prolog. The execution is sandboxed with
+/// provides MeTTa execution with SWI-Prolog. The execution is sandboxed using bubblewrap
+/// and libsandbox.so (from Cloudflare) to apply syscall whitelisting. The execution has
 /// a 10-second timeout to prevent runaway computations.
 ///
 /// # Arguments
@@ -49,16 +51,21 @@ use crate::rust::interpreter::rho_type::{
 ///
 /// # Error Conditions
 ///
-/// - `InterpreterError::SwiplError("Can't find PeTTa.")` - PeTTa installation not found at `$PETTA_PATH`
-/// - `InterpreterError::SwiplError("Can't open temp file")` - Failed to create temporary file
+/// - `InterpreterError::SwiplError("Can't find petta.sh script.")` - petta.sh script not found at `$PETTA_SCRIPT_PATH`
+/// - `InterpreterError::SwiplError("PETTA_DIR environment variable not set")` - PETTA_DIR not set
+/// - `InterpreterError::SwiplError("CACHE_DIR environment variable not set")` - CACHE_DIR not set
+/// - `InterpreterError::SwiplError("SANDBOX_LIB_PATH environment variable not set")` - SANDBOX_LIB_PATH not set
 /// - `InterpreterError::SwiplError("MeTTa execution timed out...")` - Execution exceeded 10 seconds
-/// - `InterpreterError::SwiplError("PeTTa execution failed...")` - SWI-Prolog returned error
+/// - `InterpreterError::SwiplError("PeTTa execution failed...")` - petta.sh returned error
 /// - `InterpreterError::SwiplError("Can't parse JSON output...")` - Invalid JSON from PeTTa
 /// - `InterpreterError::SwiplError("Could not parse number as i64")` - Number exceeds i64 range
 ///
 /// # Environment Variables
 ///
-/// - `PETTA_PATH` - Path to PeTTa installation directory (default: `./PeTTa`)
+/// - `PETTA_SCRIPT_PATH` - Path to petta.sh script (default: `./petta.sh`)
+/// - `PETTA_DIR` - Path to PeTTa installation directory (required)
+/// - `CACHE_DIR` - Path to cache directory for patched libraries (required)
+/// - `SANDBOX_LIB_PATH` - Path to libsandbox.so library (required)
 ///
 /// # Timeout
 ///
@@ -105,69 +112,92 @@ pub async fn petta_execute(metta_code: &str) -> Result<Par, InterpreterError> {
         ));
     }
 
-    // Get the path to PeTTa
-    let metta_module_path: PathBuf = {
-        let petta_path = PathBuf::from(env::var("PETTA_PATH").unwrap_or("./PeTTa".into()));
-        [petta_path, PathBuf::from("src/metta.pl")].iter().collect()
-    };
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(metta_file_path)?;
+    file.write_all(metta_code.as_bytes())?;
+    drop(file);
 
-    if !metta_module_path.exists() {
-        return Err(InterpreterError::SwiplError("Can't find PeTTa.".into()));
-    }
+    let result = async {
+        let petta_script_path =
+            PathBuf::from(env::var("PETTA_SCRIPT_PATH").unwrap_or("./petta.sh".into()));
 
-    let goal = format!(
-        r#"assertz(silent(true)),
-           load_metta_file('{metta_file_path}', Results),
-           use_module(library(json)),
-           json_write_dict(current_output, #{{results:Results}})."#
-    );
+        if !petta_script_path.exists() {
+            return Err(InterpreterError::SwiplError(
+                "Can't find petta.sh script.".into(),
+            ));
+        }
 
-    // TODO: Make this a configuration parameter
-    let timeout_secs: u64 = 10;
-    let proc_handle = tokio::spawn(tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        Command::new("swipl")
-            .arg("-s")
-            .arg(metta_module_path)
-            .arg("-g")
-            .arg(goal)
-            .arg("-t")
-            .arg("halt")
-            .kill_on_drop(true)
-            .output(),
-    ));
-
-    let output = proc_handle
-        .await
-        .map_err(|join_error| {
-            InterpreterError::SwiplError(
-                format!("Error while joining with the PeTTa task: {}", join_error).into(),
-            )
-        })?
-        .map_err(|_elapsed| {
-            InterpreterError::SwiplError(
-                format!("MeTTa execution timed out after {} seconds", timeout_secs).into(),
-            )
-        })?
-        .map_err(|e| {
-            InterpreterError::SwiplError(format!("MeTTa execution failed: {}", e).into())
+        let petta_dir = env::var("PETTA_DIR").map_err(|_| {
+            InterpreterError::SwiplError("PETTA_DIR environment variable not set".into())
         })?;
 
-    if !output.status.success() {
-        return Err(InterpreterError::SwiplError(
-            format!("PeTTa execution failed. {:#?}", output.stderr.as_slice()).into(),
+        let cache_dir = env::var("CACHE_DIR").map_err(|_| {
+            InterpreterError::SwiplError("CACHE_DIR environment variable not set".into())
+        })?;
+
+        let sandbox_lib_path = env::var("SANDBOX_LIB_PATH").map_err(|_| {
+            InterpreterError::SwiplError("SANDBOX_LIB_PATH environment variable not set".into())
+        })?;
+
+        let timeout_secs: u64 = 10;
+        let proc_handle = tokio::spawn(tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            Command::new(&petta_script_path)
+                .arg(metta_file_path)
+                .env("PETTA_DIR", petta_dir)
+                .env("CACHE_DIR", cache_dir)
+                .env("SANDBOX_LIB_PATH", sandbox_lib_path)
+                .kill_on_drop(true)
+                .output(),
         ));
+
+        let output = proc_handle
+            .await
+            .map_err(|join_error| {
+                InterpreterError::SwiplError(
+                    format!("Error while joining with the PeTTa task: {}", join_error).into(),
+                )
+            })?
+            .map_err(|elapsed| {
+                InterpreterError::SwiplError(
+                    format!("MeTTa execution timed out after {}", elapsed).into(),
+                )
+            })?
+            .map_err(|e| {
+                InterpreterError::SwiplError(format!("MeTTa execution failed: {}", e).into())
+            })?;
+
+        if !output.status.success() {
+            let stderr_str = String::from_utf8_lossy(&output.stderr);
+            return Err(InterpreterError::SwiplError(
+                format!("PeTTa execution failed. stderr: {}", stderr_str).into(),
+            ));
+        }
+
+        let str_output = String::from_utf8(output.stdout)
+            .map_err(|_| InterpreterError::SwiplError("Can't interpret PeTTa output".into()))?;
+
+        let value_output = serde_json::from_str::<Value>(str_output.as_str()).map_err(|e| {
+            InterpreterError::SwiplError(
+                format!(
+                    "Can't parse JSON output from PeTTa execution: {}. Output was: {}",
+                    e, str_output
+                )
+                .into(),
+            )
+        })?;
+
+        let par_output = value_to_par(value_output)?;
+        Ok(par_output)
     }
+    .await;
 
-    // Get output as string
-    let str_output = String::from_utf8(output.stdout)
-        .map_err(|_| InterpreterError::SwiplError("Can't interpret PeTTa output".into()))?;
+    remove_file(metta_file_path).ok();
 
-    let value_output = serde_json::from_str::<Value>(str_output.as_str()).map_err(|_| {
-        InterpreterError::SwiplError("Can't parse JSON output from PeTTa execution".into())
-    })?;
-    let par_output = value_to_par(value_output)?;
-    Ok(par_output)
+    result
 }
 
 /// Converts a JSON Value to a Rholang Par structure.
@@ -279,6 +309,8 @@ fn value_to_par(v: Value) -> Result<Par, InterpreterError> {
         }
     }
 }
+
+///// TESTS /////
 
 #[cfg(test)]
 mod tests {
@@ -508,16 +540,9 @@ mod tests {
     /// This uses a large fibonacci number that should exceed the timeout.
     #[tokio::test]
     async fn test_petta_execute_timeout() {
-        use std::env;
-        use std::path::PathBuf;
+        use crate::rust::interpreter::test_utils::utils::should_skip_petta_test;
 
-        // Check if PeTTa is available
-        let petta_path = PathBuf::from(env::var("PETTA_PATH").unwrap_or("./PeTTa".into()));
-        let metta_module_path: PathBuf =
-            [petta_path, PathBuf::from("src/metta.pl")].iter().collect();
-
-        if !metta_module_path.exists() {
-            eprintln!("Skipping timeout test: PeTTa not available");
+        if should_skip_petta_test() {
             return;
         }
 

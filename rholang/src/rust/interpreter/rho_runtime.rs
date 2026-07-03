@@ -1209,11 +1209,13 @@ fn setup_maps_and_refs(
     let rho_ai_binding = std_rho_ai_processes();
     let rho_chroma_binding = std_rho_chroma_processes();
     let rho_swipl_binding = std_petta_processes();
+    let rho_petta_binding = std_petta_processes();
 
     let combined_processes = system_binding
         .iter()
         .chain(rho_crypto_binding.iter())
         .chain(rho_ai_binding.iter())
+        .chain(rho_petta_binding.iter())
         .chain(extra_system_processes.iter())
         .chain(rho_chroma_binding.iter())
         .chain(rho_swipl_binding.iter())

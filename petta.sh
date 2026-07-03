@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 ### BEFORE RUNNING ###
 # 
 # Make sure the following programs are available in the PATH:
@@ -11,7 +13,6 @@ set -euo pipefail
 # * SANDBOX_LIB_PATH: path to the libsandbox.so library.
 # * CACHE_DIR: this location is where patched libraries will be placed in the
 #   host system before binding them inside the bubblewrap sandbox. 
-# * PYTHONHOME: the 
 # 
 # The flake.nix under the nix/ directory provides a development shell with all
 # the needed dependencies.
@@ -33,7 +34,7 @@ if [[ ! SANDBOX_LIB_PATH ]]; then
   exit 1
 fi
 
-source ./functions.sh
+source "${SCRIPT_DIR}/functions.sh"
 
 ### BUBBLEWRAP OPTIONS ###
 # Here we calculate the --ro-bind, --dir and --symlink options required to

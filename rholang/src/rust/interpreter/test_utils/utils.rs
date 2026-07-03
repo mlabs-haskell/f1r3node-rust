@@ -17,20 +17,35 @@ use crate::rust::interpreter::compiler::normalize::VarSort::{NameSort, ProcSort}
 pub fn should_skip_petta_test() -> bool {
     let require = env::var_os("REQUIRE_PETTA_TESTS").is_some();
 
-    let petta_path = PathBuf::from(env::var("PETTA_PATH").unwrap_or("./PeTTa".into()));
-    let metta_module_path = petta_path.join("src/metta.pl");
+    let petta_script_path =
+        PathBuf::from(env::var("PETTA_SCRIPT_PATH").unwrap_or("./petta.sh".into()));
+    let petta_dir = env::var("PETTA_DIR").ok();
+    let cache_dir = env::var("CACHE_DIR").ok();
+    let sandbox_lib_path = env::var("SANDBOX_LIB_PATH").ok();
 
-    let petta_missing = !metta_module_path.exists();
+    let petta_script_missing = !petta_script_path.exists();
+    let petta_dir_missing = petta_dir.is_none();
+    let cache_dir_missing = cache_dir.is_none();
+    let sandbox_lib_path_missing = sandbox_lib_path.is_none();
+
     let swipl_missing = Command::new("swipl")
         .arg("--version")
         .output()
         .map(|output| !output.status.success())
         .unwrap_or(true);
 
-    let error_message = match (petta_missing, swipl_missing) {
-        (false, false) => return false,
-        (true, _) => "PeTTa test prerequisite unmet: PeTTa is missing".to_string(),
-        (_, true) => "PeTTa test prerequisite unmet: swipl is missing".to_string(),
+    let error_message = if petta_script_missing {
+        "PeTTa test prerequisite unmet: petta.sh script is missing".to_string()
+    } else if petta_dir_missing {
+        "PeTTa test prerequisite unmet: PETTA_DIR environment variable not set".to_string()
+    } else if cache_dir_missing {
+        "PeTTa test prerequisite unmet: CACHE_DIR environment variable not set".to_string()
+    } else if sandbox_lib_path_missing {
+        "PeTTa test prerequisite unmet: SANDBOX_LIB_PATH environment variable not set".to_string()
+    } else if swipl_missing {
+        "PeTTa test prerequisite unmet: swipl is missing".to_string()
+    } else {
+        return false;
     };
 
     if require {
