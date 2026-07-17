@@ -7,12 +7,98 @@ use std::time::Duration;
 use models::rhoapi::Par;
 use serde_json::Value;
 use tempfile::NamedTempFile;
+use tokio::io::BufReader;
 use tokio::process::Command;
 
 use super::errors::InterpreterError;
 use crate::rust::interpreter::rho_type::{
     RhoBoolean, RhoList, RhoMap, RhoNil, RhoNumber, RhoString,
 };
+
+/// A frame emitted by the MeTTa interpreter in NODE mode.
+///
+/// Each frame corresponds to a `println!`/`trace!` invocation inside the MeTTa program
+/// and carries the channel URN and argument values to be forwarded to Rholang channels.
+#[derive(Debug, Clone)]
+pub struct Frame {
+    pub channel: String,
+    pub arguments: Vec<Par>,
+}
+
+struct PettaEnv {
+    script_path: PathBuf,
+    petta_dir: String,
+    cache_dir: String,
+    sandbox_lib_path: String,
+}
+
+impl PettaEnv {
+    fn from_env() -> Result<Self, InterpreterError> {
+        let script_path =
+            PathBuf::from(env::var("PETTA_SCRIPT_PATH").unwrap_or("./petta.sh".into()));
+
+        if !script_path.exists() {
+            return Err(InterpreterError::SwiplError(
+                "Can't find petta.sh script.".into(),
+            ));
+        }
+
+        let petta_dir = env::var("PETTA_DIR").map_err(|_| {
+            InterpreterError::SwiplError("PETTA_DIR environment variable not set".into())
+        })?;
+
+        let cache_dir = env::var("CACHE_DIR").map_err(|_| {
+            InterpreterError::SwiplError("CACHE_DIR environment variable not set".into())
+        })?;
+
+        let sandbox_lib_path = env::var("SANDBOX_LIB_PATH").map_err(|_| {
+            InterpreterError::SwiplError("SANDBOX_LIB_PATH environment variable not set".into())
+        })?;
+
+        Ok(PettaEnv {
+            script_path,
+            petta_dir,
+            cache_dir,
+            sandbox_lib_path,
+        })
+    }
+}
+
+fn create_metta_file(metta_code: &str) -> Result<(NamedTempFile, String), InterpreterError> {
+    let mut metta_file = NamedTempFile::new()
+        .map_err(|_| InterpreterError::SwiplError("Can't open temp file".into()))?;
+    metta_file
+        .write_all(metta_code.as_bytes())
+        .map_err(|_| InterpreterError::SwiplError("Can't write MeTTa code to temp file".into()))?;
+    metta_file
+        .flush()
+        .map_err(|_| InterpreterError::SwiplError("Can't flush MeTTa temp file".into()))?;
+
+    let metta_file_path = metta_file
+        .path()
+        .to_str()
+        .ok_or(InterpreterError::SwiplError(
+            "Can't convert metta_file path to string".into(),
+        ))?
+        .to_string();
+
+    if metta_file_path.contains('\'') {
+        return Err(InterpreterError::SwiplError(
+            "Temp file path contains unsafe character (single quote)".into(),
+        ));
+    }
+
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&metta_file_path)?;
+        file.write_all(metta_code.as_bytes())?;
+    }
+
+    Ok((metta_file, metta_file_path))
+}
 
 /// Executes MeTTa code through the PeTTa (SWI-Prolog) interpreter and returns the result as a Rholang Par.
 ///
@@ -72,84 +158,23 @@ use crate::rust::interpreter::rho_type::{
 /// Execution is limited to 10 seconds. Long-running computations will be terminated and return
 /// a timeout error. This prevents malicious or buggy MeTTa code from blocking the node.
 ///
-/// # Examples
-///
-/// ```ignore
-/// // Simple arithmetic
-/// let result = petta_execute("!(+ 1 2)").await?;
-///
-/// // Pattern matching
-/// let result = petta_execute(
-///     "(= (swap (Pair $x $y)) (Pair $y $x)) !(swap (Pair 1 3))"
-/// ).await?;
-/// ```
-///
 /// # See Also
 ///
 /// - [`system_processes::petta_execute`] - System process wrapper for Rholang contracts
 /// - [`value_to_par`] - JSON to Par conversion logic
+/// - [`petta_execute_framed`] - Streaming variant that returns NDJSON frames
 pub async fn petta_execute(metta_code: &str) -> Result<Par, InterpreterError> {
-    // Write the MeTTa code to a temp file
-    let mut metta_file = NamedTempFile::new()
-        .map_err(|_| InterpreterError::SwiplError("Can't open temp file".into()))?;
-    metta_file
-        .write_all(metta_code.as_bytes())
-        .map_err(|_| InterpreterError::SwiplError("Can't write MeTTa code to temp file".into()))?;
-    metta_file
-        .flush()
-        .map_err(|_| InterpreterError::SwiplError("Can't flush MeTTa temp file".into()))?;
-
-    let metta_file_path = metta_file
-        .path()
-        .to_str()
-        .ok_or(InterpreterError::SwiplError(
-            "Can't convert metta_file path to string".into(),
-        ))?;
-
-    if metta_file_path.contains('\'') {
-        return Err(InterpreterError::SwiplError(
-            "Temp file path contains unsafe character (single quote)".into(),
-        ));
-    }
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(metta_file_path)?;
-    file.write_all(metta_code.as_bytes())?;
-    drop(file);
+    let (_metta_file, metta_file_path) = create_metta_file(metta_code)?;
+    let env = PettaEnv::from_env()?;
 
     let result = async {
-        let petta_script_path =
-            PathBuf::from(env::var("PETTA_SCRIPT_PATH").unwrap_or("./petta.sh".into()));
-
-        if !petta_script_path.exists() {
-            return Err(InterpreterError::SwiplError(
-                "Can't find petta.sh script.".into(),
-            ));
-        }
-
-        let petta_dir = env::var("PETTA_DIR").map_err(|_| {
-            InterpreterError::SwiplError("PETTA_DIR environment variable not set".into())
-        })?;
-
-        let cache_dir = env::var("CACHE_DIR").map_err(|_| {
-            InterpreterError::SwiplError("CACHE_DIR environment variable not set".into())
-        })?;
-
-        let sandbox_lib_path = env::var("SANDBOX_LIB_PATH").map_err(|_| {
-            InterpreterError::SwiplError("SANDBOX_LIB_PATH environment variable not set".into())
-        })?;
-
-        let timeout_secs: u64 = 10;
         let proc_handle = tokio::spawn(tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            Command::new(&petta_script_path)
-                .arg(metta_file_path)
-                .env("PETTA_DIR", petta_dir)
-                .env("CACHE_DIR", cache_dir)
-                .env("SANDBOX_LIB_PATH", sandbox_lib_path)
+            Duration::from_secs(10),
+            Command::new(&env.script_path)
+                .arg(&metta_file_path)
+                .env("PETTA_DIR", &env.petta_dir)
+                .env("CACHE_DIR", &env.cache_dir)
+                .env("SANDBOX_LIB_PATH", &env.sandbox_lib_path)
                 .kill_on_drop(true)
                 .output(),
         ));
@@ -195,7 +220,189 @@ pub async fn petta_execute(metta_code: &str) -> Result<Par, InterpreterError> {
     }
     .await;
 
-    remove_file(metta_file_path).ok();
+    remove_file(&metta_file_path).ok();
+
+    result
+}
+
+/// Executes MeTTa code in NODE mode, returning NDJSON frames plus the final result.
+///
+/// Runs `petta.sh` with `PETTA_MODE=NODE` so that every `println!`/`trace!` inside the
+/// MeTTa program emits a JSON line `{"channel":"...","arguments":[...]}` to stdout, and
+/// the final result is emitted as `{"type":"result","value":[...]}`.
+///
+/// The function reads the child's stdout line-by-line (NDJSON) and separates:
+/// - **frames** — lines with a `"channel"` field; their `"arguments"` are converted to `Vec<Par>`
+/// - **result** — the final line with `"type":"result"`; its `"value"` is converted to a `Par`
+///
+/// # Returns
+///
+/// `Ok((frames, result))` where `frames` contains all emission frames (may be empty) and
+/// `result` is the MeTTa execution's return value as a `Par`.
+///
+/// # Error Conditions
+///
+/// Same as [`petta_execute`] plus:
+/// - `InterpreterError::SwiplError("No result line found ...")` — stdout ended without a result line
+/// - Unknown channel URNs in frames are silently skipped (the caller may handle them)
+///
+/// # Environment Variables
+///
+/// Same as [`petta_execute`], plus `PETTA_MODE=NODE` is set automatically.
+///
+/// # See Also
+///
+/// - [`petta_execute`] — single-shot variant (NORMAL mode, backward compatible)
+/// - [`Frame`] — per-println! emission frame
+/// - [`system_processes::petta_execute`] — Rholang contract wrapper that forwards frames to rspace
+pub async fn petta_execute_framed(metta_code: &str) -> Result<(Vec<Frame>, Par), InterpreterError> {
+    let (_metta_file, metta_file_path) = create_metta_file(metta_code)?;
+    let env = PettaEnv::from_env()?;
+
+    let result = async {
+        let mut child = Command::new(&env.script_path)
+            .arg(&metta_file_path)
+            .env("PETTA_MODE", "NODE")
+            .env("PETTA_DIR", &env.petta_dir)
+            .env("CACHE_DIR", &env.cache_dir)
+            .env("SANDBOX_LIB_PATH", &env.sandbox_lib_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                InterpreterError::SwiplError(format!("Failed to spawn PeTTa process: {}", e).into())
+            })?;
+
+        let child_stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| InterpreterError::SwiplError("Can't open PeTTa stdout pipe".into()))?;
+
+        let stderr_handle = {
+            let stderr = child.stderr.take();
+            tokio::spawn(async move {
+                if let Some(mut stderr) = stderr {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = String::new();
+                    stderr.read_to_string(&mut buf).await.ok();
+                    buf
+                } else {
+                    String::new()
+                }
+            })
+        };
+
+        let timeout_secs: u64 = 10;
+        let framed_result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+            use tokio::io::AsyncBufReadExt;
+            let reader = BufReader::new(child_stdout);
+            let mut lines = tokio_stream::wrappers::LinesStream::new(reader.lines());
+
+            let mut frames: Vec<Frame> = Vec::new();
+            let mut result_par: Option<Par> = None;
+
+            use tokio_stream::StreamExt;
+            while let Some(line_result) = lines.next().await {
+                let line: String = line_result.map_err(|e| {
+                    InterpreterError::SwiplError(
+                        format!("Failed to read line from PeTTa stdout: {}", e).into(),
+                    )
+                })?;
+
+                let trimmed = line.trim().to_string();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let value: Value = serde_json::from_str(&trimmed).map_err(|e| {
+                    InterpreterError::SwiplError(
+                        format!(
+                            "Can't parse JSON frame from PeTTa: {}. Line was: {}",
+                            e, trimmed
+                        )
+                        .into(),
+                    )
+                })?;
+
+                match value {
+                    Value::Object(ref map) if map.contains_key("channel") => {
+                        let channel = map
+                            .get("channel")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                InterpreterError::SwiplError(
+                                    "Frame missing 'channel' string field".into(),
+                                )
+                            })?
+                            .to_string();
+
+                        let arguments_arr = map.get("arguments").and_then(|v| v.as_array());
+                        let arguments = match arguments_arr {
+                            Some(arr) => arr
+                                .iter()
+                                .map(|v| value_to_par(v.clone()))
+                                .collect::<Result<Vec<Par>, _>>()?,
+                            None => Vec::new(),
+                        };
+
+                        frames.push(Frame { channel, arguments });
+                    }
+                    Value::Object(ref map)
+                        if map.get("type").and_then(|v| v.as_str()) == Some("result") =>
+                    {
+                        let value_field = map.get("value").ok_or_else(|| {
+                            InterpreterError::SwiplError(
+                                "Result frame missing 'value' field".into(),
+                            )
+                        })?;
+                        result_par = Some(value_to_par(value_field.clone())?);
+                    }
+                    Value::Object(ref map) if map.contains_key("results") => {
+                        result_par = Some(value_to_par(value)?);
+                    }
+                    _ => {
+                        return Err(InterpreterError::SwiplError(
+                            format!("Unknown JSON frame from PeTTa: {}", trimmed).into(),
+                        ));
+                    }
+                }
+            }
+            Ok::<_, InterpreterError>((frames, result_par))
+        })
+        .await
+        .map_err(|_| {
+            InterpreterError::SwiplError("MeTTa execution timed out after 10 seconds".into())
+        })?
+        .map_err(|e| e)?;
+
+        let (frames, result_par) = framed_result;
+
+        let result_par = result_par.ok_or_else(|| {
+            InterpreterError::SwiplError(
+                "No result line found in PeTTa output (expected line with type:'result')".into(),
+            )
+        })?;
+
+        // Collect stderr
+        let stderr_output = stderr_handle.await.unwrap_or_default();
+
+        // Wait for child and check exit
+        let exit_status = child.wait().await.map_err(|e| {
+            InterpreterError::SwiplError(format!("Failed to wait for PeTTa child: {}", e).into())
+        })?;
+
+        if !exit_status.success() {
+            return Err(InterpreterError::SwiplError(
+                format!("PeTTa execution failed. stderr: {}", stderr_output).into(),
+            ));
+        }
+
+        Ok((frames, result_par))
+    }
+    .await;
+
+    remove_file(&metta_file_path).ok();
 
     result
 }

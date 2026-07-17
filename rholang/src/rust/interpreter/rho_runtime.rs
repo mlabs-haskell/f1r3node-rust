@@ -1047,6 +1047,14 @@ fn dispatch_table_creator(
 
     all_processes.append(extra_system_processes);
 
+    // Build a URN → fixed_channel map so the petta_execute handler can forward frames
+    let urn_to_channel: Arc<HashMap<String, Par>> = Arc::new(
+        all_processes
+            .iter()
+            .map(|def| (def.urn.clone(), def.fixed_channel.clone()))
+            .collect(),
+    );
+
     for def in all_processes.iter_mut() {
         let tuple = def.to_dispatch_table(ProcessContext::create(
             space.clone(),
@@ -1059,6 +1067,7 @@ fn dispatch_table_creator(
             ollama_service.clone(),
             grpc_client_service.clone(),
             chromadb_service.clone(),
+            urn_to_channel.clone(),
         ));
 
         dispatch_table.insert(tuple.0, tuple.1);

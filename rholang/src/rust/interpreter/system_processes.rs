@@ -37,7 +37,7 @@ use super::rho_type::{
     RhoBoolean, RhoByteArray, RhoDeployId, RhoDeployerId, RhoList, RhoName, RhoNumber, RhoString,
     RhoSysAuthToken, RhoUri,
 };
-use super::swi_prolog_service::petta_execute;
+use super::swi_prolog_service::{petta_execute_framed, Frame};
 use super::util::vault_address::VaultAddress;
 use crate::rust::interpreter::chromadb_service::SharedChromaDBService;
 #[cfg(feature = "chromadb")]
@@ -345,6 +345,7 @@ pub struct ProcessContext {
     /// consulting it directly instead of duplicating the table.
     pub urn_map: Arc<HashMap<String, Par>>,
     pub system_processes: SystemProcesses,
+    pub urn_to_channel: Arc<HashMap<String, Par>>,
 }
 
 impl ProcessContext {
@@ -359,6 +360,7 @@ impl ProcessContext {
         ollama_service: SharedOllamaService,
         grpc_client_service: GrpcClientService,
         chromadb_service: SharedChromaDBService,
+        urn_to_channel: Arc<HashMap<String, Par>>,
     ) -> Self {
         ProcessContext {
             space: space.clone(),
@@ -377,7 +379,9 @@ impl ProcessContext {
                 ollama_service,
                 grpc_client_service,
                 chromadb_service,
+                urn_to_channel.clone(),
             ),
+            urn_to_channel,
         }
     }
 }
@@ -539,6 +543,7 @@ pub struct SystemProcesses {
     pretty_printer: PrettyPrinter,
     #[allow(dead_code)] // Note: This isn't dead when the chromadb flag is used
     chromadb_service: SharedChromaDBService,
+    pub urn_to_channel: Arc<HashMap<String, Par>>,
 }
 
 impl SystemProcesses {
@@ -552,6 +557,7 @@ impl SystemProcesses {
         ollama_service: SharedOllamaService,
         grpc_client_service: GrpcClientService,
         chromadb_service: SharedChromaDBService,
+        urn_to_channel: Arc<HashMap<String, Par>>,
     ) -> Self {
         SystemProcesses {
             dispatcher,
@@ -564,6 +570,7 @@ impl SystemProcesses {
             grpc_client_service,
             pretty_printer: PrettyPrinter::new(),
             chromadb_service,
+            urn_to_channel,
         }
     }
 
@@ -2111,6 +2118,12 @@ impl SystemProcesses {
         &self,
         contract_args: (Vec<ListParWithRandom>, bool, Vec<Par>),
     ) -> Result<Vec<Par>, InterpreterError> {
+        let rand = contract_args
+            .0
+            .first()
+            .map(|lpwr| lpwr.random_state.clone())
+            .unwrap_or_default();
+
         let Some((produce, is_replay, previous_output, args)) =
             self.is_contract_call().unapply(contract_args)
         else {
@@ -2124,19 +2137,28 @@ impl SystemProcesses {
             return Err(illegal_argument_error("petta_execute"));
         };
 
-        if is_replay {
-            produce(&previous_output, ack).await?;
-            return Ok(previous_output);
-        }
-
-        let output = match petta_execute(&metta_code).await {
-            Ok(par) => vec![par],
+        let (frames, output_par) = match petta_execute_framed(&metta_code).await {
+            Ok((frames, par)) => (frames, par),
             Err(e) => {
                 return Err(InterpreterError::NonDeterministicProcessFailure {
                     cause: Box::new(e),
                     output_not_produced: vec![],
                 });
             }
+        };
+
+        // Forward emission frames to their Rholang channels.
+        if let Err(e) = self.forward_frames(&frames, rand.clone()).await {
+            return Err(InterpreterError::NonDeterministicProcessFailure {
+                cause: Box::new(e),
+                output_not_produced: vec![],
+            });
+        }
+
+        let output = if is_replay {
+            previous_output
+        } else {
+            vec![output_par]
         };
 
         if let Err(e) = produce(&output, ack).await {
@@ -2146,6 +2168,46 @@ impl SystemProcesses {
             });
         }
         Ok(output)
+    }
+
+    /// Forward frames emitted by the MeTTa interpreter to their Rholang channels.
+    ///
+    /// Each frame specifies a channel URN (e.g. `"rho:io:stdout"`) and a list of argument
+    /// `Par` values. This method looks up the URN in the `urn_to_channel` map and produces
+    /// each argument on the corresponding fixed channel via rspace.
+    async fn forward_frames(
+        &self,
+        frames: &[Frame],
+        rand: Vec<u8>,
+    ) -> Result<(), InterpreterError> {
+        for frame in frames {
+            let channel_par = match self.urn_to_channel.get(&frame.channel) {
+                Some(ch) => ch.clone(),
+                None => {
+                    tracing::warn!(target: "f1r3fly.petta",
+                        "Unknown channel URN in frame: {}", frame.channel);
+                    continue;
+                }
+            };
+
+            for arg in &frame.arguments {
+                let lpwr = ListParWithRandom {
+                    pars: vec![arg.clone()],
+                    random_state: rand.clone(),
+                };
+
+                self.space
+                    .produce(channel_par.clone(), lpwr, false)
+                    .await
+                    .map_err(|e| InterpreterError::NonDeterministicProcessFailure {
+                        cause: Box::new(InterpreterError::SwiplError(
+                            format!("Failed to produce on channel {}: {}", frame.channel, e).into(),
+                        )),
+                        output_not_produced: vec![],
+                    })?;
+            }
+        }
+        Ok(())
     }
 }
 
