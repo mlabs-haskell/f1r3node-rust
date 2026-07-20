@@ -107,15 +107,17 @@ PROGRAM_FILE=$1
 # Session path (simply the CWD of swipl)
 SESSION_PATH="/tmp/session"
 
+PETTA_BLOCK_GOAL=$(petta_block_preds_goal)
+
 if [ "${PETTA_MODE}" = "NODE" ]; then
   # NODE mode: emit NDJSON frames for println!/trace!, final result as {"type":"result","value":[...]}
   # Override println! by making it dynamic, abolishing the old clause, and asserting the new frame-emitting clause.
   NODE_BINDS=""
-  GOAL="assertz(silent(true)), assertz(working_dir('${SESSION_PATH}')), use_module(library(json)), dynamic('println!'/2), abolish('println!'/2), asserta(('println!'(Arg,true) :- swrite(Arg,RArg), json_write_dict(current_output, _{channel:'rho:io:stdout',arguments:[RArg]}), nl(current_output))), load_metta_file('program.metta', Results), json_write_dict(current_output, _{type:'result', value:Results}), nl(current_output)."
+  GOAL="${PETTA_BLOCK_GOAL}, assertz(silent(true)), assertz(working_dir('${SESSION_PATH}')), use_module(library(json)), dynamic('println!'/2), abolish('println!'/2), asserta(('println!'(Arg,true) :- swrite(Arg,RArg), json_write_dict(current_output, _{channel:'rho:io:stdout',arguments:[RArg]}), nl(current_output))), load_metta_file('program.metta', Results), json_write_dict(current_output, _{type:'result', value:Results}), nl(current_output)."
 else
   # NORMAL mode (default): emit single {results:[...]} JSON envelope, raw println!/trace! to stdout
   NODE_BINDS=""
-  GOAL="assertz(silent(true)), assertz(working_dir('${SESSION_PATH}')), load_metta_file('program.metta', Results), use_module(library(json)), json_write_dict(current_output, #{results:Results})."
+  GOAL="${PETTA_BLOCK_GOAL}, assertz(silent(true)), assertz(working_dir('${SESSION_PATH}')), load_metta_file('program.metta', Results), use_module(library(json)), json_write_dict(current_output, #{results:Results})."
 fi
 
 ### SECCOMP FILTERS ###

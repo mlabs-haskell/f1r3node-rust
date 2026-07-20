@@ -1,6 +1,6 @@
 use prost::Message;
 use rholang::rust::interpreter::rho_type::{RhoList, RhoMap, RhoNumber, RhoString};
-use rholang::rust::interpreter::swi_prolog_service::petta_execute;
+use rholang::rust::interpreter::swi_prolog_service::{petta_execute, petta_execute_with_blocks};
 use rholang::rust::interpreter::test_utils::utils::should_skip_petta_test;
 
 /// Tests for PeTTa execution service. This service is experimental.
@@ -185,5 +185,79 @@ async fn test_petta_execute_timeout_large_fibonacci() {
         err_msg.contains("timed out") || err_msg.contains("timeout"),
         "Error should be a timeout error, got: {}",
         err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_petta_readln_blocked_by_default() {
+    if should_skip_petta_test() {
+        return;
+    }
+
+    // By default petta.sh blocks readln!.  The predicate should resolve
+    // to unevaluated data rather than reading from stdin.
+    let metta_code = "!(readln!)";
+    let result = petta_execute(metta_code).await;
+
+    assert!(
+        result.is_ok(),
+        "Blocked readln! should resolve to data: {:?}",
+        result.err()
+    );
+    let par = result.unwrap();
+
+    // The unevaluated form is the literal list ["readln!"] inside results.
+    let expected = RhoMap::create_par(
+        vec![(
+            RhoString::create_par("results".into()),
+            RhoList::create_par(vec![RhoList::create_par(vec![RhoString::create_par(
+                "readln!".into(),
+            )])]),
+        )]
+        .into_iter()
+        .collect(),
+    );
+
+    assert_eq!(
+        par, expected,
+        "Blocked readln! should yield {{\"results\": [[\"readln!\"]]}}, got {:?}",
+        par
+    );
+}
+
+#[tokio::test]
+async fn test_petta_custom_blocked_pred() {
+    if should_skip_petta_test() {
+        return;
+    }
+
+    // Use the explicit override API so we don't touch the process-global env.
+    let metta_code = r#"!(println! "hi")"#;
+    let result = petta_execute_with_blocks(metta_code, Some("println!")).await;
+
+    assert!(
+        result.is_ok(),
+        "Blocked println! should resolve to data: {:?}",
+        result.err()
+    );
+    let par = result.unwrap();
+
+    // The unevaluated form is the literal list ["println!", "hi"].
+    let expected = RhoMap::create_par(
+        vec![(
+            RhoString::create_par("results".into()),
+            RhoList::create_par(vec![RhoList::create_par(vec![
+                RhoString::create_par("println!".into()),
+                RhoString::create_par("hi".into()),
+            ])]),
+        )]
+        .into_iter()
+        .collect(),
+    );
+
+    assert_eq!(
+        par, expected,
+        "Blocked println! should yield {{\"results\": [[\"println!\", \"hi\"]]}}, got {:?}",
+        par
     );
 }

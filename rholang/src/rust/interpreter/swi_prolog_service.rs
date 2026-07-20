@@ -30,6 +30,7 @@ struct PettaEnv {
     petta_dir: String,
     cache_dir: String,
     sandbox_lib_path: String,
+    blocked_preds: Option<String>,
 }
 
 impl PettaEnv {
@@ -55,11 +56,14 @@ impl PettaEnv {
             InterpreterError::SwiplError("SANDBOX_LIB_PATH environment variable not set".into())
         })?;
 
+        let blocked_preds = env::var("PETTA_BLOCKED_PREDS").ok();
+
         Ok(PettaEnv {
             script_path,
             petta_dir,
             cache_dir,
             sandbox_lib_path,
+            blocked_preds,
         })
     }
 }
@@ -152,6 +156,10 @@ fn create_metta_file(metta_code: &str) -> Result<(NamedTempFile, String), Interp
 /// - `PETTA_DIR` - Path to PeTTa installation directory (required)
 /// - `CACHE_DIR` - Path to cache directory for patched libraries (required)
 /// - `SANDBOX_LIB_PATH` - Path to libsandbox.so library (required)
+/// - `PETTA_BLOCKED_PREDS` - Space-separated list of MeTTa predicates to block from the
+///   running program (default: `readln!`). Each predicate in this list is removed from
+///   the `&self` space and unregistered from the dispatcher before the user's program
+///   executes.
 ///
 /// # Timeout
 ///
@@ -163,21 +171,31 @@ fn create_metta_file(metta_code: &str) -> Result<(NamedTempFile, String), Interp
 /// - [`system_processes::petta_execute`] - System process wrapper for Rholang contracts
 /// - [`value_to_par`] - JSON to Par conversion logic
 /// - [`petta_execute_framed`] - Streaming variant that returns NDJSON frames
-pub async fn petta_execute(metta_code: &str) -> Result<Par, InterpreterError> {
+/// Executes MeTTa code with an optional override for the blocked-predicate list.
+/// When `blocked_preds` is `Some(list)`, it is forwarded as `PETTA_BLOCKED_PREDS`
+/// to petta.sh regardless of the process environment.
+pub async fn petta_execute_with_blocks(
+    metta_code: &str,
+    blocked_preds: Option<&str>,
+) -> Result<Par, InterpreterError> {
     let (_metta_file, metta_file_path) = create_metta_file(metta_code)?;
-    let env = PettaEnv::from_env()?;
+    let mut env = PettaEnv::from_env()?;
+    if let Some(bp) = blocked_preds {
+        env.blocked_preds = Some(bp.to_string());
+    }
 
     let result = async {
-        let proc_handle = tokio::spawn(tokio::time::timeout(
-            Duration::from_secs(10),
-            Command::new(&env.script_path)
-                .arg(&metta_file_path)
+        let proc_handle = tokio::spawn(tokio::time::timeout(Duration::from_secs(10), {
+            let mut cmd = Command::new(&env.script_path);
+            cmd.arg(&metta_file_path)
                 .env("PETTA_DIR", &env.petta_dir)
                 .env("CACHE_DIR", &env.cache_dir)
-                .env("SANDBOX_LIB_PATH", &env.sandbox_lib_path)
-                .kill_on_drop(true)
-                .output(),
-        ));
+                .env("SANDBOX_LIB_PATH", &env.sandbox_lib_path);
+            if let Some(ref bp) = env.blocked_preds {
+                cmd.env("PETTA_BLOCKED_PREDS", bp);
+            }
+            cmd.kill_on_drop(true).output()
+        }));
 
         let output = proc_handle
             .await
@@ -225,6 +243,12 @@ pub async fn petta_execute(metta_code: &str) -> Result<Par, InterpreterError> {
     result
 }
 
+/// Executes MeTTa code through the PeTTa (SWI-Prolog) interpreter
+/// (convenience wrapper that reads `PETTA_BLOCKED_PREDS` from the env).
+pub async fn petta_execute(metta_code: &str) -> Result<Par, InterpreterError> {
+    petta_execute_with_blocks(metta_code, None).await
+}
+
 /// Executes MeTTa code in NODE mode, returning NDJSON frames plus the final result.
 ///
 /// Runs `petta.sh` with `PETTA_MODE=NODE` so that every `println!`/`trace!` inside the
@@ -260,12 +284,16 @@ pub async fn petta_execute_framed(metta_code: &str) -> Result<(Vec<Frame>, Par),
     let env = PettaEnv::from_env()?;
 
     let result = async {
-        let mut child = Command::new(&env.script_path)
-            .arg(&metta_file_path)
+        let mut cmd = Command::new(&env.script_path);
+        cmd.arg(&metta_file_path)
             .env("PETTA_MODE", "NODE")
             .env("PETTA_DIR", &env.petta_dir)
             .env("CACHE_DIR", &env.cache_dir)
-            .env("SANDBOX_LIB_PATH", &env.sandbox_lib_path)
+            .env("SANDBOX_LIB_PATH", &env.sandbox_lib_path);
+        if let Some(ref bp) = env.blocked_preds {
+            cmd.env("PETTA_BLOCKED_PREDS", bp);
+        }
+        let mut child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)

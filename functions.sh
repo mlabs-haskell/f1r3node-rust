@@ -172,3 +172,57 @@ function generate-binds-libs() {
     
     echo ${BINDS}
 }
+
+##### BLOCKED PREDICATE SUPPORT #####
+
+# Quote a predicate name as a Prolog single-quoted atom.
+metta_quote_atom() {
+    local NAME=$1
+    local ESCAPED="${NAME//\'/\'\'}"
+    echo "'${ESCAPED}'"
+}
+
+# Emit two Prolog goal fragments:
+#   1. assertz((block_predicate(N) :- ...))
+#   2. forall(member(P, [LIST]), block_predicate(P))
+#
+# Reads PETTA_BLOCKED_PREDS (default: "readln!") as a space-separated list.
+petta_block_preds_goal() {
+    local pred_list="${PETTA_BLOCKED_PREDS:-readln!}"
+    local prolog_items=""
+    local first_item=true
+
+    if [[ -n "$pred_list" ]]; then
+        for p in $pred_list; do
+            local quoted
+            quoted=$(metta_quote_atom "$p")
+            if $first_item; then
+                prolog_items="$quoted"
+                first_item=false
+            else
+                prolog_items="$prolog_items, $quoted"
+            fi
+        done
+    fi
+
+    local prolog_list="[${prolog_items}]"
+
+    # block_predicate clause (compacted to one line; -g does not handle newlines well)
+    cat <<'PROLOG_GOAL' | tr -d '\n'
+assertz((block_predicate(N) :-
+    findall(A, current_predicate(N/A), As),
+    forall(member(A, As), catch(abolish(N,A), _, true)),
+    retractall(fun(N)),
+    retractall(arity(N, _)),
+    retractall(ho_specialization(N, _)),
+    retractall(ho_specialization(_, N)),
+    retractall('&self'('=', [N|_], _)),
+    retractall('&self'(':', N, _)),
+    findall(Ref, ( current_predicate('&self'/Ar),
+                   functor(H, '&self', Ar), Ar >= 2,
+                   arg(1, H, N), clause(H, _, Ref) ), Refs),
+    forall(member(Ref, Refs), catch(erase(Ref), _, true)),
+    catch(nb_delete(N), _, true))),
+PROLOG_GOAL
+    printf 'forall(member(P, %s), block_predicate(P))' "${prolog_list}"
+}
