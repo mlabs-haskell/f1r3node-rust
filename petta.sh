@@ -63,7 +63,7 @@ else
 fi
 
 # Options for adding the python3 /lib directory
-PYTHONHOME=$(python3 -c "import sys; print(' '.join(sys.path).strip())" | sed -rn 's/[ ]*([^ ]+)\/lib\/[^ ]*/\1\n/pg' | uniq)
+PYTHONHOME=$(python3 -c "import sys; print(' '.join(sys.path).strip())" | sed -rn 's/[ ]*([^ ]+)\/lib\/[ ]*/\1\n/pg' | uniq | head -1)
 PYTHON_HOME_BINDS="--ro-bind ${PYTHONHOME} /lib/python"
 
 # Options for re-creating the swipl home inside the  sandbox. We can't just
@@ -82,7 +82,7 @@ if [ ! -f ${CACHE_DIR}/cached_swipl_home_binds ]; then
     --ro-bind ${SWIPL_HOME_DIR}/demo /lib/swipl/demo
     --ro-bind ${SWIPL_HOME_DIR}/doc /lib/swipl/doc
     --ro-bind ${SWIPL_HOME_DIR}/include /lib/swipl/include
-    --dir ${SWIPL_HOME_DIR}/lib
+    --dir /lib/swipl/lib
     --ro-bind ${SWIPL_HOME_DIR}/library /lib/swipl/library
     --ro-bind ${SWIPL_HOME_DIR}/swipl.home /lib/swipl/swipl.home
   "
@@ -113,11 +113,11 @@ if [ "${PETTA_MODE}" = "NODE" ]; then
   # NODE mode: emit NDJSON frames for println!/trace!, final result as {"type":"result","value":[...]}
   # Override println! by making it dynamic, abolishing the old clause, and asserting the new frame-emitting clause.
   NODE_BINDS=""
-  GOAL="${PETTA_BLOCK_GOAL}, assertz(silent(true)), assertz(working_dir('${SESSION_PATH}')), use_module(library(json)), dynamic('println!'/2), abolish('println!'/2), asserta(('println!'(Arg,true) :- swrite(Arg,RArg), json_write_dict(current_output, _{channel:'rho:io:stdout',arguments:[RArg]}), nl(current_output))), load_metta_file('program.metta', Results), json_write_dict(current_output, _{type:'result', value:Results}), nl(current_output)."
+  GOAL="${PETTA_BLOCK_GOAL}, assertz(silent(true)), assertz(working_dir('${SESSION_PATH}')), catch(use_module(library(json)), _, use_module(library(http/json))), dynamic('println!'/2), abolish('println!'/2), asserta(('println!'(Arg,true) :- swrite(Arg,RArg), json_write_dict(current_output, _{channel:'rho:io:stdout',arguments:[RArg]}), nl(current_output))), load_metta_file('program.metta', Results), json_write_dict(current_output, _{type:'result', value:Results}), nl(current_output)."
 else
   # NORMAL mode (default): emit single {results:[...]} JSON envelope, raw println!/trace! to stdout
   NODE_BINDS=""
-  GOAL="${PETTA_BLOCK_GOAL}, assertz(silent(true)), assertz(working_dir('${SESSION_PATH}')), load_metta_file('program.metta', Results), use_module(library(json)), json_write_dict(current_output, #{results:Results})."
+  GOAL="${PETTA_BLOCK_GOAL}, assertz(silent(true)), assertz(working_dir('${SESSION_PATH}')), load_metta_file('program.metta', Results), catch(use_module(library(json)), _, use_module(library(http/json))), json_write_dict(current_output, #{results:Results})."
 fi
 
 ### SECCOMP FILTERS ###
@@ -136,7 +136,9 @@ else
 fi
 
 # Taken from an audit of syscalls while running the entire PeTTa test suite
-SECCOMP_SYSCALL_ALLOW="read:write:open:lseek:mprotect:munmap:brk:rt_sigaction:rt_sigprocmask:access:madvise:getpid:exit:fcntl:getcwd:readlink:sigaltstack:prctl:futex:sched_getaffinity:getdents64:clock_gettime:exit_group:set_robust_list:prlimit64:getrandom:rseq:clone3:openat:fstat:newfstatat:mmap:close:ioctl:rt_sigreturn:mkdir:getuid:getgid:geteuid:getegid:gettid:tgkill:socket:connect"
+# Allow override via environment variable
+DEFAULT_SECCOMP_SYSCALL_ALLOW="read:write:open:lseek:mprotect:munmap:brk:rt_sigaction:rt_sigprocmask:access:madvise:getpid:exit:fcntl:getcwd:readlink:sigaltstack:prctl:futex:sched_getaffinity:getdents64:clock_gettime:exit_group:set_robust_list:prlimit64:getrandom:rseq:clone3:openat:fstat:newfstatat:mmap:close:ioctl:rt_sigreturn:mkdir:getuid:getgid:geteuid:getegid:gettid:tgkill:socket:connect:stat:getdents:clone:uname:arch_prctl:set_tid_address:pselect6:pipe2:dup:dup2:eventfd2:epoll_create1:epoll_ctl:epoll_pwait:writev:readv:sendto:recvfrom:getsockname:getpeername:socketpair:shutdown:setsockopt:getsockopt:bind:listen:accept4:sysinfo"
+SECCOMP_SYSCALL_ALLOW=${SECCOMP_SYSCALL_ALLOW:-$DEFAULT_SECCOMP_SYSCALL_ALLOW}
 
 ### BUBBLEWRAP ###
 
@@ -181,8 +183,10 @@ SECCOMP_SYSCALL_ALLOW="read:write:open:lseek:mprotect:munmap:brk:rt_sigaction:rt
       --setenv TERMINFO "/lib/terminal/terminfo" \
       --setenv TERMINFO_DIRS "/usr/share/terminfo" \
       --setenv LD_PRELOAD "/lib/libsandbox.so" \
+      --setenv SECCOMP_DEFAULT_ACTION "${SECCOMP_DEFAULT_ACTION:-kill}" \
       --setenv SECCOMP_SYSCALL_ALLOW "${SECCOMP_SYSCALL_ALLOW}" \
       --setenv PYTHONHOME "/lib/python" \
+      --setenv LD_LIBRARY_PATH "/lib/python/lib/x86_64-linux-gnu" \
       --file 11 /etc/passwd \
       --file 12 /etc/group \
     swipl --stack_limit=8g -q -s /lib/PeTTa/src/metta.pl -g "${GOAL}" -t halt \

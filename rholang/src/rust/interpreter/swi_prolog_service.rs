@@ -294,6 +294,7 @@ pub async fn petta_execute_framed(metta_code: &str) -> Result<(Vec<Frame>, Par),
             cmd.env("PETTA_BLOCKED_PREDS", bp);
         }
         let mut child = cmd
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)

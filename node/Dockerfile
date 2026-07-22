@@ -151,7 +151,39 @@ WORKDIR /build
 ENTRYPOINT ["bash", "-c", "case \"$(uname -m)\" in aarch64) export RUSTFLAGS='-C target-feature=+aes' ;; *) export RUSTFLAGS='-C target-feature=+aes,+sse2' ;; esac; exec rholang/tests/RUN_PETTA_TESTS.sh"]
 
 # ============================================================================
-# Stage 2: Runtime base - Install runtime dependencies (cached independently)
+# Stage 2: Sandbox library builder - Build Cloudflare libsandbox.so (seccomp)
+# ============================================================================
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS sandbox-builder
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    make \
+    curl \
+    ca-certificates \
+    git \
+    gperf \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone Cloudflare sandbox (LD_PRELOAD seccomp library)
+RUN git clone --depth 1 https://github.com/cloudflare/sandbox /tmp/sandbox
+
+# Build libseccomp as a static library (required by sandbox Makefile)
+WORKDIR /tmp/sandbox
+RUN curl -L -o libseccomp.tar.gz \
+    https://github.com/seccomp/libseccomp/releases/download/v2.5.5/libseccomp-2.5.5.tar.gz && \
+    tar xf libseccomp.tar.gz && \
+    mv libseccomp-2.5.5 libseccomp
+
+WORKDIR /tmp/sandbox/libseccomp
+RUN ./configure --enable-shared=no && make
+
+# Build libsandbox.so
+WORKDIR /tmp/sandbox
+RUN make && \
+    cp libsandbox.so /libsandbox.so
+
+# ============================================================================
+# Stage 4: Runtime base - Install runtime dependencies (cached independently)
 # ============================================================================
 FROM debian:bookworm-slim AS runtime-base
 
@@ -175,6 +207,9 @@ RUN apt-get update && apt-get install -y \
     python3 \
     libpython3.11 \
     swi-prolog \
+    bubblewrap \
+    patchelf \
+    ncurses-term \
     && if [ "${PROFILING_BUILD}" = "1" ]; then apt-get install -y linux-perf procps binutils; fi \
     && rm -rf /var/lib/apt/lists/*
 
@@ -202,7 +237,7 @@ RUN GRPCURL_VERSION="1.8.9" && \
     chmod +x /usr/local/bin/jq || true
 
 # ============================================================================
-# Stage 3: Runtime - Final image, starts at WORKDIR with artifacts from builder
+# Stage 5: Runtime - Final image, starts at WORKDIR with artifacts from builder
 # ============================================================================
 FROM runtime-base
 
@@ -238,16 +273,31 @@ RUN /usr/bin/swipl -g "use_module(library(janus)), py_call(builtins:int('5'), X)
     /usr/bin/swipl -g "use_module(library(http/json)), halt." -t "halt(1)" && \
     echo "=== SWI-Prolog/janus self-test PASSED ==="
 
+# Copy Cloudflare libsandbox.so for seccomp sandbox
+COPY --from=sandbox-builder /libsandbox.so /usr/lib/libsandbox.so
+
+# Copy petta.sh and functions.sh (required by PeTTa sandboxed execution)
+COPY petta.sh functions.sh /opt/docker/
+
 # Create entrypoint script for Rust (adapted from docker-entrypoint.sh)
 # Copy the Rust-specific entrypoint script from node directory
 # Note: This Dockerfile should be built from workspace root
 COPY node/docker-entrypoint-rust.sh /opt/docker/bin/docker-entrypoint.sh
+
+# Create SWI-Prolog paths that petta.sh expects but Debian package omits
+RUN SWI_HOME=$(swipl --home 2>/dev/null || echo "/usr/lib/swi-prolog") && \
+    [ -f "$SWI_HOME/ABI" ] || echo "9.0.4" > "$SWI_HOME/ABI" && \
+    [ -d "$SWI_HOME/app" ] || mkdir -p "$SWI_HOME/app" && \
+    [ -d "$SWI_HOME/doc" ] || mkdir -p "$SWI_HOME/doc"
 
 # Set permissions (matching build.sbt: withUser "daemon" withGroup "daemon")
 RUN if [ ! -f /opt/docker/bin/node ]; then \
         echo "ERROR: /opt/docker/bin/node is not a file!" >&2 && \
         exit 1; \
     fi && \
+    mkdir -p /opt/docker/.petta-cache && \
+    chmod +x /opt/docker/petta.sh && \
+    chmod +x /opt/docker/functions.sh && \
     chown -R daemon:daemon /opt/docker && \
     chmod +x /opt/docker/bin/node && \
     chmod +x /opt/docker/bin/docker-entrypoint.sh
@@ -268,8 +318,17 @@ ARG VERSION=unknown
 LABEL maintainer="F1r3fly.io LCA https://f1r3fly.io/"
 LABEL version="0.4.45"
 
-# Set PETTA_PATH environment variable for MeTTa contract execution
-ENV PETTA_PATH=/opt/docker/PeTTa
+# Set environment variables for PeTTa sandboxed execution
+# PETTA_PATH is used for local testing only; PETTA_SCRIPT_PATH and PETTA_DIR are consumed by swi_prolog_service.rs
+ENV PETTA_PATH=/opt/docker/PeTTa \
+    PETTA_SCRIPT_PATH=/opt/docker/petta.sh \
+    PETTA_DIR=/opt/docker/PeTTa \
+    CACHE_DIR=/opt/docker/.petta-cache \
+    SANDBOX_LIB_PATH=/usr/lib/libsandbox.so \
+    PETTA_BLOCKED_PREDS=readln! \
+    TERMINFO=/usr/share/terminfo \
+    TERMINFO_DIRS=/usr/share/terminfo \
+    HOME=/opt/docker
 
 # Switch to daemon user (matching build.sbt: daemonUser in Docker := "daemon")
 USER daemon

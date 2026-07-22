@@ -20,7 +20,15 @@ function shared-libraries()
 function linker()
 {
   local PROGRAM=$1
-  echo $(shared-libraries ${PROGRAM} | grep -o '[^ ]*ld-linux[^ ]*')
+  # Try readelf first (reliable for all ELF binaries)
+  # readelf output: [Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]
+  local interp=$(readelf -l "$PROGRAM" 2>/dev/null | sed -n 's/.*\[Requesting program interpreter: \(.*\)\]/\1/p')
+  if [ -n "$interp" ]; then
+    echo "$interp"
+  else
+    # Fallback: parse ldd output (may fail for some binaries like swipl)
+    echo $(shared-libraries ${PROGRAM} | grep -o '[^ ]*ld-linux[^ ]*')
+  fi
 }
 
 ##### ELF PATCHING #####
@@ -135,6 +143,17 @@ function generate-binds-exes() {
             # Patch and bind other libraries
             local PATCHED_LIB=$(patched-library "${LIB}")
             BINDS="${BINDS} --ro-bind ${PATCHED_LIB} /lib/${LIB_BASENAME}"
+        fi
+    done
+
+    # Add the dynamic linker for each program (ldd may not show it for all binaries)
+    for PROGRAM in $*; do
+        local LNK=$(linker $(program-file "${PROGRAM}") 2>/dev/null)
+        if [ -n "$LNK" ] && [ -f "$LNK" ]; then
+            local LNK_BASENAME=$(basename "$LNK")
+            if [[ "$LNK_BASENAME" == ld-linux* ]]; then
+                [[ " ${UNIQUE_LIBS[@]} " =~ " ${LNK} " ]] || BINDS="${BINDS} --ro-bind ${LNK} /lib/${LNK_BASENAME}"
+            fi
         fi
     done
     
