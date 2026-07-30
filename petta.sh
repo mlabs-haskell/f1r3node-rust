@@ -171,7 +171,7 @@ SECCOMP_SYSCALL_ALLOW=${SECCOMP_SYSCALL_ALLOW:-$DEFAULT_SECCOMP_SYSCALL_ALLOW}
       --dev /dev \
       --chdir /tmp/session \
       --unshare-all \
-      --share-net \
+      --unshare-net \
       --die-with-parent \
       --dir /run/user/$(id -u) \
       --clearenv \
