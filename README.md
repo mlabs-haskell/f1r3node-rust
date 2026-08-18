@@ -50,6 +50,65 @@ cargo install just
 
 The workspace is pinned to `nightly-2026-02-09` in `rust-toolchain.toml`.
 
+### (Optional) PeTTa (for the `rho:petta:execute` system service)
+
+The `rho:petta:execute` system service runs MeTTa code through
+[PeTTa](https://github.com/trueagi-io/PeTTa) (a MeTTa interpreter written in
+SWI-Prolog). When running the node locally (outside Docker) you must make it
+available on your system yourself.
+
+The Docker image already includes it, so this step is only needed for local runs.
+
+1. Install SWI-Prolog (`swipl`), version `9.3.x` or newer, **with the janus
+   Python bridge**. PeTTa makes use of thir bridge, which
+   only exists in recent SWI-Prolog builds — older interpreters fail at load time
+   with `` source_sink `library(janus)' does not exist ``.
+
+   > ⚠️ The `swi-prolog` package on Debian bookworm (and matching Ubuntu releases)
+   > is **9.0.4**, which predates janus and will not work. Use a newer build from
+   > one of the sources below. This is why the Docker image pulls SWI-Prolog from
+   > the official `swipl` image instead of the distro package — see the
+   > `swipl-extract` stage in [node/Dockerfile](node/Dockerfile).
+
+   Ubuntu (SWI-Prolog stable PPA — ships a recent janus-capable build):
+   ```bash
+   sudo apt-add-repository ppa:swi-prolog/stable
+   sudo apt update
+   sudo apt install swi-prolog
+   ```
+
+   macOS (Homebrew — recent versions include janus):
+   ```bash
+   brew install swi-prolog
+   ```
+
+   Any platform (no local install): run `swipl` from the official image, which is
+   exactly what the node's Docker build uses:
+   ```bash
+   docker run --rm -it swipl:stable swipl --version
+   ```
+
+   Verify janus is available:
+   ```bash
+   swipl -g "use_module(library(janus)), halt" -t "halt(1)"
+   ```
+   The command should exit silently (status 0); an error means janus is missing.
+
+2. Clone PeTTa somewhere on your machine and point `PETTA_PATH` at it. Using the
+   same commit the Docker image pins keeps local behaviour in sync with the
+   container (see `PETTA_REF` in [node/Dockerfile](node/Dockerfile)):
+   ```bash
+   git clone https://github.com/trueagi-io/PeTTa.git ~/PeTTa
+   git -C ~/PeTTa checkout 52e85c6d02d016a4734559a64b2a69e8fdc385fc
+   export PETTA_PATH=~/PeTTa
+   ```
+
+   Add the `export PETTA_PATH=...` line to your shell profile (`~/.bashrc`,
+   `~/.zshrc`, ...) so it persists across sessions. If `PETTA_PATH` is unset the
+   node falls back to `./PeTTa` relative to the working directory, which no longer
+   exists in the repository, so setting it explicitly is required.
+
+
 ### Git Hooks (Required)
 
 The pre-commit and pre-push hooks gate every commit and every push. **Install them before your first commit:**
