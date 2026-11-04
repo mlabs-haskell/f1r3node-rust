@@ -19,6 +19,20 @@ new rl(`rho:registry:lookup`), thmCh, mapCh, ack in {
 }
 "#;
 
+// Same as INIT_MAP but seeds no key, so a later write to any key creates that
+// key's leaf from scratch.
+const INIT_MAP_EMPTY: &str = r#"
+new rl(`rho:registry:lookup`), thmCh, mapCh in {
+  rl!(`rho:lang:treeHashMap`, *thmCh) |
+  for (thm <- thmCh) {
+    thm!("init", 1, *mapCh) |
+    for (@map <- mapCh) {
+      @"registry-merge-map"!(map)
+    }
+  }
+}
+"#;
+
 fn set_key(key: &str, value: i64) -> String {
     format!(
         r#"
@@ -50,7 +64,7 @@ fn assert_no_failed_deploys(block: &BlockMessage) {
 
 /// Two sibling blocks write `key1` and `key2` into one TreeHashMap that already
 /// holds `"k"`. Returns whether each write was rejected in the merge block.
-async fn merge_two_writes(key1: &str, key2: &str) -> (bool, bool) {
+async fn merge_two_writes(init: &str, key1: &str, key2: &str) -> (bool, bool) {
     crate::init_logger();
 
     let genesis = GenesisBuilder::new()
@@ -84,7 +98,7 @@ async fn merge_two_writes(key1: &str, key2: &str) -> (bool, bool) {
 
     let base = nodes[0]
         .add_block_from_deploys(&[deploy(
-            INIT_MAP.to_string(),
+            init.to_string(),
             construct_deploy::DEFAULT_SEC.clone(),
             0,
         )])
@@ -140,7 +154,7 @@ async fn merge_two_writes(key1: &str, key2: &str) -> (bool, bool) {
 /// Both writes consume the same leaf datum, so the merge keeps exactly one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writes_to_the_same_registry_key_reject_exactly_one() {
-    let (write1_rejected, write2_rejected) = merge_two_writes("k", "k").await;
+    let (write1_rejected, write2_rejected) = merge_two_writes(INIT_MAP, "k", "k").await;
     assert!(
         write1_rejected != write2_rejected,
         "write1_rejected={write1_rejected}, write2_rejected={write2_rejected}"
@@ -151,9 +165,25 @@ async fn concurrent_writes_to_the_same_registry_key_reject_exactly_one() {
 /// which BitmaskOr merges, so neither write is rejected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writes_to_different_registry_keys_reject_none() {
-    let (write1_rejected, write2_rejected) = merge_two_writes("a", "b").await;
+    let (write1_rejected, write2_rejected) = merge_two_writes(INIT_MAP, "a", "b").await;
     assert!(
         !write1_rejected && !write2_rejected,
         "write1_rejected={write1_rejected}, write2_rejected={write2_rejected}"
+    );
+}
+
+/// Two sibling blocks write the SAME unseeded key. Each deploy creates the
+/// key's leaf from scratch (MakeNode produces 0, the setter consumes it and
+/// produces its own Map), so the two writes share no destroyed event and the
+/// merge conflict check never fires. The leaf Map is non-numeric, so the
+/// single-value overfill guard exempts it too. Expected (correct) behavior is
+/// exactly one rejection, as in the seeded same-key case; the suspected bug is
+/// that neither is rejected and the leaf ends up holding two datums.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writes_to_the_same_fresh_registry_key_reject_exactly_one() {
+    let (write1_rejected, write2_rejected) = merge_two_writes(INIT_MAP_EMPTY, "a", "a").await;
+    assert!(
+        write1_rejected != write2_rejected,
+        "same fresh key must reject exactly one: write1_rejected={write1_rejected}, write2_rejected={write2_rejected}"
     );
 }
