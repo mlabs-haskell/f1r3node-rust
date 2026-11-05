@@ -1,0 +1,271 @@
+// Identity Registry.
+
+// Per-operation payloads. For each operation the Rust client and this
+// contract construct the same payload bytes from a shared set of structured
+// args. The client signs the digest locally, and the contract rebuilds the
+// payload from the args it receives on the wire and verifies the signature
+// against the digest.
+//
+//   register:     0x01 || pk(65)   || nonce(32)                     == 98 bytes
+//   rotate:       0x02 || name(32) || new_pk(65) || seq.toByteArray()
+//   admin_relink: 0x03 || name(32) || new_pk(65) || seq.toByteArray() || admin_evidence
+//
+// name = blake2b256(payload_register)
+// Every operation's `sig` is a secp256k1 signature over blake2b256(payload).
+
+new
+  identityRegistry,
+  identityRegistryUri,
+  insertArbitrary(`rho:registry:insertArbitrary`),
+  stdout(`rho:io:stdout`),
+  deployerId(`rho:rchain:deployerId`),
+  secpVerify(`rho:crypto:secp256k1Verify`),
+  blake2b256(`rho:crypto:blake2b256Hash`)
+in {
+  insertArbitrary!(*identityRegistry, *identityRegistryUri) |
+  for (@uri <- identityRegistryUri) {
+    stdout!("Identity Registry URI: ${uri}" %% {"uri": uri}) |
+    @"{{uri_slot}}"!(uri)
+  }
+  |
+
+  new identities, adminPk in {
+    // REG-D3: the admin is the deployer. Baked in once and never changes in
+    // the prototype. The deployerId's Par representation prefixes the raw
+    // 65-byte secp256k1 pubkey with 6 bytes of wrapper.
+    //
+    // TODO: Update to a multi-signer admin (quorum). The spec stubs this as a
+    // single admin key for the prototype (D32). Swapping it out should only
+    // change the signer set in admin_relink's sig check.
+    adminPk!(*deployerId.toByteArray().slice(6, 71)) |
+
+    // The identity map. Keyed by name (32-byte ByteArray, == blake2b256(payload_register)).
+    // Record shape:
+    //   { "current": ByteArray(65),
+    //     "history": [{ "pk": ByteArray(65), "op": String, "seq": Int, "admin_evidence"?: ByteArray }, ...],
+    //     "seq":     Int
+    //   }
+    //
+    // TODO: Measure contention. Every mutating op (register, rotate,
+    // admin_relink) consumes this channel, so concurrent mutating calls
+    // serialize through it. Reads use peek and do not contend. If
+    // throughput becomes a demo bottleneck, consider sharding by name
+    // prefix or moving to per-identity channels.
+    identities!({}) |
+
+    // register(pk, nonce, sig, ret)
+    //
+    // payload = 0x01 || pk(65) || nonce(32) - built by the contract from the args.
+    // sig     = secp256k1 signature over blake2b256(payload), under pk.
+    //
+    // The 32-byte client-supplied nonce decouples the name from the pk so
+    // that the same key can back more than one identity under different
+    // nonces. Replay of a captured (pk, nonce, sig) still collapses to an
+    // idempotent no-op because the name is derived from the full payload
+    // (REG-AC6).
+    //
+    // Responses:
+    //   ("err", "bad_signature") when the signature does not verify under pk.
+    //   ("ok", name) on fresh mint, or as an idempotent no-op when the name
+    //   already exists (REG-AC6).
+    contract @[*identityRegistry, "register"](@pk, @nonce, @sig, ret) = {
+      new hashCh, verifyCh in {
+        blake2b256!(
+          "01".hexToBytes() ++ pk ++ nonce,
+          *hashCh
+        ) |
+        for (@hash <- hashCh) {
+          secpVerify!(hash, sig, pk, *verifyCh) |
+          for (@valid <- verifyCh) {
+            if (valid) {
+              for (@m <- identities) {
+                match m.get(hash) {
+                  Nil => {
+                    identities!(m.set(hash, {
+                      "current": pk,
+                      "history": [{"pk": pk, "op": "register", "seq": 0}],
+                      "seq": 0
+                    })) |
+                    ret!(("ok", hash))
+                  }
+                  _ => {
+                    identities!(m) |
+                    ret!(("ok", hash))
+                  }
+                }
+              }
+            } else {
+              ret!(("err", "bad_signature"))
+            }
+          }
+        }
+      }
+    }
+    |
+
+    // rotate(name, newPk, seq, sig, ret)
+    //
+    // payload = 0x02 || name(32) || new_pk(65) || seq.toByteArray()
+    // sig     = secp256k1 signature over blake2b256(payload), signed by the
+    //           identity's current key.
+    //
+    // The contract builds `payload` itself from the args, so the client and
+    // the contract never disagree on canonical bytes.
+    //
+    // Responses:
+    //   ("err", "unknown_name") when `name` is not registered.
+    //   ("err", "seq_mismatch") when `seq` does not match the record's current
+    //   seq.
+    //   ("err", "bad_signature") when the signature does not verify under the
+    //   record's current key.
+    //   ("ok", newSeq) on success, where newSeq = seq + 1. The record's
+    //   current key becomes newPk, the previous key stays in history, and
+    //   seq is bumped (REG-AC4, REG-AC5).
+    contract @[*identityRegistry, "rotate"](@name, @newPk, @seq, @sig, ret) = {
+      for (@m <- identities) {
+        match m.get(name) {
+          Nil => {
+            identities!(m) |
+            ret!(("err", "unknown_name"))
+          }
+          rec => {
+            if (seq != rec.get("seq")) {
+              identities!(m) |
+              ret!(("err", "seq_mismatch"))
+            } else {
+              new hashCh, verifyCh in {
+                blake2b256!(
+                  "02".hexToBytes() ++ name ++ newPk ++ seq.toByteArray(),
+                  *hashCh
+                ) |
+                for (@hash <- hashCh) {
+                  secpVerify!(hash, sig, rec.get("current"), *verifyCh) |
+                  for (@valid <- verifyCh) {
+                    if (valid) {
+                      identities!(m.set(name, {
+                        "current": newPk,
+                        "history": rec.get("history") ++
+                          [{"pk": newPk, "op": "rotate", "seq": seq + 1}],
+                        "seq": seq + 1
+                      })) |
+                      ret!(("ok", seq + 1))
+                    } else {
+                      identities!(m) |
+                      ret!(("err", "bad_signature"))
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    |
+
+    // admin_relink(name, newPk, seq, adminEvidence, sig, ret)
+    //
+    // The compromised-key path (REG-D3, REG-AC9). Signed by the registry's
+    // admin pk (baked in at deploy time). adminEvidence is recorded verbatim
+    // in history and never validated.
+    //
+    // payload = 0x03 || name(32) || new_pk(65) || seq.toByteArray() || adminEvidence
+    // sig     = secp256k1 signature over blake2b256(payload), signed by the
+    //           admin pk.
+    //
+    // Responses:
+    //   ("err", "unknown_name") when `name` is not registered.
+    //   ("err", "seq_mismatch") when `seq` does not match the record's current
+    //   seq.
+    //   ("err", "bad_signature") when the signature does not verify under the
+    //   registry's admin key.
+    //   ("ok", newSeq) on success, where newSeq = seq + 1. The record's
+    //   current key becomes newPk, the history grows by one entry carrying
+    //   the adminEvidence, and seq is bumped.
+    contract @[*identityRegistry, "admin_relink"]
+      (@name, @newPk, @seq, @adminEvidence, @sig, ret) = {
+      for (@adminPkVal <<- adminPk) {
+        for (@m <- identities) {
+          match m.get(name) {
+            Nil => {
+              identities!(m) |
+              ret!(("err", "unknown_name"))
+            }
+            rec => {
+              if (seq != rec.get("seq")) {
+                identities!(m) |
+                ret!(("err", "seq_mismatch"))
+              } else {
+                new hashCh, verifyCh in {
+                  blake2b256!(
+                    "03".hexToBytes() ++
+                      name ++
+                      newPk ++
+                      seq.toByteArray() ++
+                      adminEvidence,
+                    *hashCh
+                  ) |
+                  for (@hash <- hashCh) {
+                    secpVerify!(hash, sig, adminPkVal, *verifyCh) |
+                    for (@valid <- verifyCh) {
+                      if (valid) {
+                        identities!(m.set(name, {
+                          "current": newPk,
+                          "history": rec.get("history") ++
+                            [{"pk": newPk, "op": "admin_relink", "seq": seq + 1,
+                              "admin_evidence": adminEvidence}],
+                          "seq": seq + 1
+                        })) |
+                        ret!(("ok", seq + 1))
+                      } else {
+                        identities!(m) |
+                        ret!(("err", "bad_signature"))
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    |
+
+    // resolve_current(name, ret)
+    //
+    // Returns the key currently authorised to sign for this identity plus
+    // its sequence number (bundled because a caller building a rotate payload
+    // needs both).
+    //
+    // Responses:
+    //   ("err", "unknown_name")
+    //   ("ok", {"pk": ByteArray(65), "seq": Int})
+    contract @[*identityRegistry, "resolve_current"](@name, ret) = {
+      for (@m <<- identities) {
+        match m.get(name) {
+          Nil => ret!(("err", "unknown_name"))
+          rec => ret!(("ok", {"pk": rec.get("current"), "seq": rec.get("seq")}))
+        }
+      }
+    }
+    |
+
+    // resolve_history(name, ret)
+    //
+    // Returns the full append-only history for this identity. Needed for
+    // attributing claims signed under previously-current keys (REG-AC8).
+    //
+    // Responses:
+    //   ("err", "unknown_name")
+    //   ("ok", [{"pk", "op", "seq", "admin_evidence"?}, ...])
+    contract @[*identityRegistry, "resolve_history"](@name, ret) = {
+      for (@m <<- identities) {
+        match m.get(name) {
+          Nil => ret!(("err", "unknown_name"))
+          rec => ret!(("ok", rec.get("history")))
+        }
+      }
+    }
+  }
+}
