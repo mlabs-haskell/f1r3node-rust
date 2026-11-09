@@ -1,4 +1,4 @@
-.PHONY: firefly build test deploy \
+.PHONY: firefly clear-firefly build test deploy \
         register rotate admin-relink resolve-current resolve-history keygen
 
 # Spin up a local F1r3fly shard via the workspace's docker compose. Copies
@@ -8,6 +8,14 @@ firefly:
 		cp ../docker/.env.example ../docker/.env; \
 	fi
 	docker compose -f ../docker/shard.yml up
+
+# Stop the shard and wipe all node data volumes. Useful when finality has
+# fallen behind block production and the proposer starts refusing new blocks
+# because too many unfinalized blocks have piled up above the last finalized
+# tip. A fresh genesis resets the finalized tip to block 0 so reruns work
+# again. Run between test campaigns when deploys pile up.
+clear-firefly:
+	docker compose -f ../docker/shard.yml down -v
 
 build:
 	cargo build --release
