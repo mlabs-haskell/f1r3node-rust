@@ -226,6 +226,12 @@ pub struct GenesisBlockData {
     /// `native-token-name`. Operators MUST set this in config before genesis.
     #[serde(rename = "native-token-decimals")]
     pub native_token_decimals: u32,
+
+    /// Hex-encoded uncompressed secp256k1 public key (65 bytes) of the
+    /// identity registry administrator. Baked into the IdentityRegistry
+    /// contract at genesis. Immutable after genesis.
+    #[serde(rename = "identity-registry-admin-public-key")]
+    pub identity_registry_admin_public_key: String,
 }
 
 /// Maximum decimal places accepted for native token. Matches the de-facto
@@ -261,6 +267,21 @@ impl GenesisBlockData {
             ));
         }
         Ok(())
+    }
+
+    /// Validates `identity-registry-admin-public-key`. The value is spliced
+    /// into the genesis Rholang source, so a malformed key must fail startup
+    /// instead of breaking genesis.
+    pub fn validate_identity_registry_admin(&self) -> Result<(), String> {
+        let key = &self.identity_registry_admin_public_key;
+        match hex::decode(key) {
+            Ok(bytes) if bytes.len() == 65 && bytes[0] == 0x04 => Ok(()),
+            _ => Err(format!(
+                "identity-registry-admin-public-key must be a hex-encoded uncompressed \
+                 secp256k1 public key (65 bytes, 04 prefix); got {:?}",
+                key
+            )),
+        }
     }
 }
 
@@ -510,6 +531,7 @@ mod native_token_validation_tests {
             native_token_name: "F1R3FLY".into(),
             native_token_symbol: "F1R3".into(),
             native_token_decimals: 8,
+            identity_registry_admin_public_key: crate::rust::genesis::contracts::standard_deploys::DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEY.into(),
         }
     }
 
@@ -576,5 +598,19 @@ mod native_token_validation_tests {
         let mut g = valid_genesis();
         g.native_token_decimals = MAX_NATIVE_TOKEN_DECIMALS;
         g.validate_native_token().unwrap();
+    }
+
+    #[test]
+    fn identity_registry_admin_key_validation() {
+        let mut g = valid_genesis();
+        g.validate_identity_registry_admin().unwrap();
+        let truncated = g.identity_registry_admin_public_key[2..].to_string();
+        for bad in ["", "zz", &truncated, "02ab"] {
+            g.identity_registry_admin_public_key = bad.into();
+            assert!(
+                g.validate_identity_registry_admin().is_err(),
+                "accepted {bad:?}"
+            );
+        }
     }
 }

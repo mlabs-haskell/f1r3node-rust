@@ -1,5 +1,5 @@
 // secp256k1 signing and verification over the payload digest. Matches the
-// scheme that rholang/identity_registry.rho uses on-chain via
+// scheme that casper/src/main/resources/IdentityRegistry.rhox uses on-chain via
 // rho:crypto:secp256k1Verify.
 
 use crate::payload::blake2b256;

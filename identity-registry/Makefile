@@ -1,4 +1,4 @@
-.PHONY: firefly clear-firefly build test deploy \
+.PHONY: firefly clear-firefly build test \
         register rotate admin-relink resolve-current resolve-history keygen
 
 # Spin up a local F1r3fly shard via the workspace's docker compose. Copies
@@ -25,14 +25,11 @@ build:
 test:
 	cargo test --features integration_tests --test identity_registry -- --test-threads=1
 
-deploy:
-	cargo run --bin registry_cli -- deploy
-
 # Registry CLI targets. All require F1R3FLY_SIGNING_KEY in the environment.
-# All except `deploy` and `keygen` also require IDENTITY_REGISTRY_URI.
+# IDENTITY_REGISTRY_URI defaults to the genesis registry
+# (rho:system:identityRegistry).
 # Op-specific args are passed as make variables.
 #
-#   make deploy
 #   make keygen
 #   make register
 #   make register SK=<32-byte hex> NONCE=<32-byte hex>

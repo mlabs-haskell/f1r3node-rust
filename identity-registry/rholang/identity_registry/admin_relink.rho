@@ -1,7 +1,7 @@
 new ret, lookup(`rho:registry:lookup`), registryCh in {
   lookup!(`{{uri}}`, *registryCh) |
-  for (registry <- registryCh) {
-    @[*registry, "admin_relink"]!(
+  for (@(_, registry) <- registryCh) {
+    @[registry, "admin_relink"]!(
       "{{name_hex}}".hexToBytes(),
       "{{new_pk_hex}}".hexToBytes(),
       {{seq}},

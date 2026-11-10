@@ -1,5 +1,5 @@
 // Canonical byte builders mirroring the layouts enforced by
-// rholang/identity_registry.rho. Any change here must be matched in the
+// casper/src/main/resources/IdentityRegistry.rhox. Any change here must be matched in the
 // contract and vice versa.
 
 use blake2::{Blake2b, Digest};

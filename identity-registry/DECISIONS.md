@@ -179,10 +179,9 @@ merger upstream.
 These are not independent decisions, but recording them here keeps
 surprise off the page.
 
-- The administrator for the prototype is the party who deployed the
-  contract. The contract reads the administrator key from the deployer
-  identity at deploy time. The spec allows this to become a quorum later.
-  Only the admin relink signature check would need to change.
+- The administrator for the prototype is a single key set at genesis.
+  The spec allows this to become a quorum later. Only the admin
+  relink signature check would need to change.
 - The administrator evidence supplied with an admin relink is stored
   exactly as the caller sent it. The contract does not validate it, per
   the spec.

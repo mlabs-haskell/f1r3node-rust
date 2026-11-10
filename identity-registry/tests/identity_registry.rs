@@ -2,7 +2,9 @@
 // Requires:
 //   - A running F1R3FLY cluster on 127.0.0.1:40422 (gRPC internal)
 //   - F1R3FLY_SIGNING_KEY env var set to a 32-byte hex secp256k1 key with
-//     REV balance on that cluster
+//     REV balance on that cluster. The admin relink test also signs with it,
+//     so it must match the genesis identity-registry-admin-public-key (the
+//     docker bootstrap key by default).
 //
 // Run with: cargo test --features integration_tests -- --nocapture
 
@@ -18,14 +20,12 @@ use identity_registry::reply::{fetch_reply, parse_tagged_reply};
 use identity_registry::signing::{sign_payload, signature_der, uncompressed_pk_bytes};
 use identity_registry::term::{new_reply_slot, register_term};
 use std::env;
-use std::fs;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::OnceCell;
 
 const NODE_HOST: &str = "127.0.0.1";
 const GRPC_PORT: u16 = 40422;
-const CONTRACT_PATH: &str = "rholang/identity_registry.rho";
+const REGISTRY_URI: &str = "rho:system:identityRegistry";
 
 // --- Harness -----------------------------------------------------------------
 
@@ -42,28 +42,12 @@ fn signing_key() -> &'static str {
 /// several pending deploys into one block.
 const POST_DEPLOY_WAIT: Duration = Duration::from_secs(5);
 
-/// Deploys the identity registry contract exactly once per test process and
-/// caches the URI. Every test shares the same registry but operates on its
-/// own fresh keypair/name so they don't interfere.
-async fn shared_uri() -> &'static str {
-    static URI: OnceCell<String> = OnceCell::const_new();
-    URI.get_or_init(|| async {
-        let mut client = IdentityRegistryClient::new(signing_key(), NODE_HOST, GRPC_PORT, None)
-            .expect("init client");
-        client.post_deploy_wait = POST_DEPLOY_WAIT;
-        let rho = fs::read_to_string(CONTRACT_PATH).expect("read contract source");
-        let (_block_hash, uri) =
-            client.deploy_contract(&rho).await.expect("deploy identity registry");
-        uri
-    })
-    .await
-    .as_str()
-}
-
+/// Every test shares the genesis registry but operates on its own fresh
+/// keypair/name so they don't interfere.
 async fn test_client() -> IdentityRegistryClient {
-    let uri = shared_uri().await.to_string();
-    let mut client = IdentityRegistryClient::new(signing_key(), NODE_HOST, GRPC_PORT, Some(uri))
-        .expect("init client");
+    let mut client =
+        IdentityRegistryClient::new(signing_key(), NODE_HOST, GRPC_PORT, Some(REGISTRY_URI.into()))
+            .expect("init client");
     client.post_deploy_wait = POST_DEPLOY_WAIT;
     client
 }
@@ -331,7 +315,7 @@ async fn admin_relink_works_and_is_bounded() {
     let nonce = fresh_nonce();
     let name = client.register(&sk1, &nonce).await.expect("register");
 
-    // The deployer of the contract is the admin (REG-D3). Signing with that
+    // The genesis-configured key is the admin (REG-D3). Signing with that
     // key succeeds and records the evidence.
     let admin = admin_sk();
     let (sk_new, pk_new) = fresh_keypair();
