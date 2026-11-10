@@ -235,6 +235,7 @@ async fn run_compute_parents_post_state_finalized_skew_regression() {
         native_token_name: "F1R3CAP".to_string(),
         native_token_symbol: "F1R3".to_string(),
         native_token_decimals: 8,
+        identity_registry_admin_public_key: casper::rust::genesis::contracts::standard_deploys::DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEY.to_string(),
         fs_bundle: Vec::new(),
         consensus_fs_snapshot_cadence: None,
     };
@@ -480,6 +481,7 @@ async fn run_compute_parents_dag_cover_fast_path_regression() {
         native_token_name: "F1R3CAP".to_string(),
         native_token_symbol: "F1R3".to_string(),
         native_token_decimals: 8,
+        identity_registry_admin_public_key: casper::rust::genesis::contracts::standard_deploys::DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEY.to_string(),
         fs_bundle: Vec::new(),
         consensus_fs_snapshot_cadence: None,
     };
@@ -736,6 +738,7 @@ async fn run_compute_parents_post_state_missing_mergeable_regression() {
         native_token_name: "F1R3CAP".to_string(),
         native_token_symbol: "F1R3".to_string(),
         native_token_decimals: 8,
+        identity_registry_admin_public_key: casper::rust::genesis::contracts::standard_deploys::DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEY.to_string(),
         fs_bundle: Vec::new(),
         consensus_fs_snapshot_cadence: None,
     };
@@ -974,6 +977,7 @@ async fn run_visible_blocks_scope_test() {
         native_token_name: "F1R3CAP".to_string(),
         native_token_symbol: "F1R3".to_string(),
         native_token_decimals: 8,
+        identity_registry_admin_public_key: casper::rust::genesis::contracts::standard_deploys::DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEY.to_string(),
         fs_bundle: Vec::new(),
         consensus_fs_snapshot_cadence: None,
     };
