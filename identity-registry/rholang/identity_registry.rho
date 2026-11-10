@@ -30,7 +30,7 @@ in {
   }
   |
 
-  new identities, adminPk in {
+  new identities, adminPk, registerLock in {
     // REG-D3: the admin is the deployer. Baked in once and never changes in
     // the prototype. The deployerId's Par representation prefixes the raw
     // 65-byte secp256k1 pubkey with 6 bytes of wrapper.
@@ -39,6 +39,10 @@ in {
     // single admin key for the prototype (D32). Swapping it out should only
     // change the signer set in admin_relink's sig check.
     adminPk!(*deployerId.toByteArray().slice(6, 71)) |
+
+    // Initial token for the register lock. See the fresh-leaf race TODO
+    // below for why this exists.
+    registerLock!(Nil) |
 
     // The identity store. Keyed by name (32-byte ByteArray, == blake2b256(payload_register)).
     // Record shape:
@@ -54,10 +58,12 @@ in {
     // channel. identities holds the pair (TreeHashMap system contract, map
     // handle) persistently, so every contract peeks it.
     //
-    // TODO: Fresh-leaf race. The TreeHashMap merger catches concurrent writes
+    // FIXME: Fresh-leaf race. The TreeHashMap merger catches concurrent writes
     // to an existing leaf through the standard RSpace consume rule on the
     // leaf map, but two blocks that both create the same leaf for the first
-    // time can leave two Maps on the leaf channel.
+    // time can leave two Maps on the leaf channel. Mitigated for now by
+    // serializing register through a global registerLock. Remove once the
+    // merger catches this case.
     new treeHashMapCh in {
       lookup!(`rho:lang:treeHashMap`, *treeHashMapCh) |
       for (treeHashMap <- treeHashMapCh) {
@@ -95,21 +101,25 @@ in {
           secpVerify!(hash, sig, pk, *verifyCh) |
           for (@valid <- verifyCh) {
             if (valid) {
-              for (@(treeHashMap, identitiesHandle) <<- identities) {
-                new existsCh in {
-                  @treeHashMap!("contains", identitiesHandle, hash, *existsCh) |
-                  for (@exists <- existsCh) {
-                    if (exists) {
-                      ret!(("ok", hash))
-                    } else {
-                      new ackCh in {
-                        @treeHashMap!("set", identitiesHandle, hash, {
-                          "current": pk,
-                          "history": [{"pk": pk, "op": "register", "seq": 0}],
-                          "seq": 0
-                        }, *ackCh) |
-                        for (_ <- ackCh) {
-                          ret!(("ok", hash))
+              for (_ <- registerLock) {
+                for (@(treeHashMap, identitiesHandle) <<- identities) {
+                  new existsCh in {
+                    @treeHashMap!("contains", identitiesHandle, hash, *existsCh) |
+                    for (@exists <- existsCh) {
+                      if (exists) {
+                        registerLock!(Nil) |
+                        ret!(("ok", hash))
+                      } else {
+                        new ackCh in {
+                          @treeHashMap!("set", identitiesHandle, hash, {
+                            "current": pk,
+                            "history": [{"pk": pk, "op": "register", "seq": 0}],
+                            "seq": 0
+                          }, *ackCh) |
+                          for (_ <- ackCh) {
+                            registerLock!(Nil) |
+                            ret!(("ok", hash))
+                          }
                         }
                       }
                     }
