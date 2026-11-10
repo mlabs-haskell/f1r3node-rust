@@ -122,21 +122,27 @@ impl IdentityRegistryClient {
         bytes_to_array::<NAME_LEN>(name_bytes, "name")
     }
 
-    /// Signs and submits a rotate call. Returns the new seq on success.
+    /// Signs and submits a rotate call. `new_sk` signs the payload a second
+    /// time as proof the submitter holds the new key. Returns the new seq
+    /// on success.
     pub async fn rotate(
         &self,
         current_sk: &SecretKey,
         name: &[u8; NAME_LEN],
-        new_pk: &[u8; PK_LEN],
+        new_sk: &SecretKey,
         seq: u64,
     ) -> Result<u64, IdentityRegistryError> {
         let uri = self.require_uri()?;
-        let payload = rotate_payload(name, new_pk, seq);
+        let new_pk = PublicKey::from_secret_key(&Secp256k1::new(), new_sk);
+        let new_pk_bytes = uncompressed_pk_bytes(&new_pk);
+        let payload = rotate_payload(name, &new_pk_bytes, seq);
         let sig = sign_payload(&payload, current_sk);
         let sig_der = signature_der(&sig);
+        let new_sig = sign_payload(&payload, new_sk);
+        let new_sig_der = signature_der(&new_sig);
 
         let slot = new_reply_slot();
-        let term = rotate_term(uri, name, new_pk, seq, &sig_der, &slot);
+        let term = rotate_term(uri, name, &new_pk_bytes, seq, &sig_der, &new_sig_der, &slot);
         let block_hash = self.deploy(&term).await?;
 
         let value = parse_tagged_reply(
@@ -147,22 +153,37 @@ impl IdentityRegistryClient {
 
     /// Signs and submits an admin_relink call. `admin_sk` is the admin's
     /// secret key, which in the prototype equals the deployer's key.
-    /// Returns the new seq on success.
+    /// `new_sk` signs the payload a second time as proof the new key
+    /// holder has consented to taking over the identity. Returns the new
+    /// seq on success.
     pub async fn admin_relink(
         &self,
         admin_sk: &SecretKey,
         name: &[u8; NAME_LEN],
-        new_pk: &[u8; PK_LEN],
+        new_sk: &SecretKey,
         seq: u64,
         admin_evidence: &[u8],
     ) -> Result<u64, IdentityRegistryError> {
         let uri = self.require_uri()?;
-        let payload = admin_relink_payload(name, new_pk, seq, admin_evidence);
+        let new_pk = PublicKey::from_secret_key(&Secp256k1::new(), new_sk);
+        let new_pk_bytes = uncompressed_pk_bytes(&new_pk);
+        let payload = admin_relink_payload(name, &new_pk_bytes, seq, admin_evidence);
         let sig = sign_payload(&payload, admin_sk);
         let sig_der = signature_der(&sig);
+        let new_sig = sign_payload(&payload, new_sk);
+        let new_sig_der = signature_der(&new_sig);
 
         let slot = new_reply_slot();
-        let term = admin_relink_term(uri, name, new_pk, seq, admin_evidence, &sig_der, &slot);
+        let term = admin_relink_term(
+            uri,
+            name,
+            &new_pk_bytes,
+            seq,
+            admin_evidence,
+            &sig_der,
+            &new_sig_der,
+            &slot,
+        );
         let block_hash = self.deploy(&term).await?;
 
         let value = parse_tagged_reply(

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use rand::RngCore;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use identity_registry::IdentityRegistryClient;
-use identity_registry::payload::{NAME_LEN, NONCE_LEN, PK_LEN};
+use identity_registry::payload::{NAME_LEN, NONCE_LEN};
 use std::env;
 use std::fs;
 
@@ -58,9 +58,10 @@ enum Command {
         #[arg(long)]
         current_sk: String,
 
-        /// New public key (65-byte uncompressed hex).
+        /// New secret key (32-byte hex). Must also sign the rotate payload
+        /// as proof the submitter holds the new key.
         #[arg(long)]
-        new_pk: String,
+        new_sk: String,
 
         /// Expected current seq.
         #[arg(long)]
@@ -73,9 +74,10 @@ enum Command {
         #[arg(long)]
         name: String,
 
-        /// New public key (65-byte uncompressed hex).
+        /// New secret key (32-byte hex). Must sign the relink payload as
+        /// proof the new key holder consents to taking over the identity.
         #[arg(long)]
-        new_pk: String,
+        new_sk: String,
 
         /// Expected current seq.
         #[arg(long)]
@@ -153,22 +155,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("nonce:                   {}", hex::encode(nonce_bytes));
             println!("name:                    {}", hex::encode(name));
         }
-        Command::Rotate { name, current_sk, new_pk, seq } => {
+        Command::Rotate { name, current_sk, new_sk, seq } => {
             let name_bytes = parse_hex_array::<NAME_LEN>(&name, "name")?;
             let current_sk_bytes = parse_hex_array::<32>(&current_sk, "current_sk")?;
-            let new_pk_bytes = parse_hex_array::<PK_LEN>(&new_pk, "new_pk")?;
+            let new_sk_bytes = parse_hex_array::<32>(&new_sk, "new_sk")?;
             let current = SecretKey::from_byte_array(current_sk_bytes)?;
-            let new_seq = client.rotate(&current, &name_bytes, &new_pk_bytes, seq).await?;
+            let new = SecretKey::from_byte_array(new_sk_bytes)?;
+            let new_seq = client.rotate(&current, &name_bytes, &new, seq).await?;
             println!("new_seq: {new_seq}");
         }
-        Command::AdminRelink { name, new_pk, seq, evidence } => {
+        Command::AdminRelink { name, new_sk, seq, evidence } => {
             let name_bytes = parse_hex_array::<NAME_LEN>(&name, "name")?;
-            let new_pk_bytes = parse_hex_array::<PK_LEN>(&new_pk, "new_pk")?;
+            let new_sk_bytes = parse_hex_array::<32>(&new_sk, "new_sk")?;
             let evidence_bytes = hex::decode(&evidence)?;
             let admin_sk_bytes = parse_hex_array::<32>(&deploy_sk_hex, "F1R3FLY_SIGNING_KEY")?;
             let admin_sk = SecretKey::from_byte_array(admin_sk_bytes)?;
+            let new = SecretKey::from_byte_array(new_sk_bytes)?;
             let new_seq = client
-                .admin_relink(&admin_sk, &name_bytes, &new_pk_bytes, seq, &evidence_bytes)
+                .admin_relink(&admin_sk, &name_bytes, &new, seq, &evidence_bytes)
                 .await?;
             println!("new_seq: {new_seq}");
         }

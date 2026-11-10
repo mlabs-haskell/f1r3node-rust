@@ -125,11 +125,14 @@ in {
     }
     |
 
-    // rotate(name, newPk, seq, sig, ret)
+    // rotate(name, newPk, seq, sig, newSig, ret)
     //
     // payload = 0x02 || name(32) || new_pk(65) || seq.toByteArray()
-    // sig     = secp256k1 signature over blake2b256(payload), signed by the
+    // sig     = secp256k1 signature over blake2b256(payload), by the
     //           identity's current key.
+    // newSig  = secp256k1 signature over the same hash, by the new key.
+    //           Proves the submitter holds newPk, so an attacker cannot
+    //           rotate an identity onto a key they do not control.
     //
     // The contract builds `payload` itself from the args, so the client and
     // the contract never disagree on canonical bytes.
@@ -138,12 +141,11 @@ in {
     //   ("err", "unknown_name") when `name` is not registered.
     //   ("err", "seq_mismatch") when `seq` does not match the record's current
     //   seq.
-    //   ("err", "bad_signature") when the signature does not verify under the
-    //   record's current key.
+    //   ("err", "bad_signature") when either signature does not verify.
     //   ("ok", newSeq) on success, where newSeq = seq + 1. The record's
     //   current key becomes newPk, the previous key stays in history, and
     //   seq is bumped (REG-AC4, REG-AC5).
-    contract @[*identityRegistry, "rotate"](@name, @newPk, @seq, @sig, ret) = {
+    contract @[*identityRegistry, "rotate"](@name, @newPk, @seq, @sig, @newSig, ret) = {
       for (@(treeHashMap, identitiesHandle) <<- identities) {
         new existingCh in {
           @treeHashMap!("get", identitiesHandle, name, *existingCh) |
@@ -154,28 +156,30 @@ in {
                 if (seq != rec.get("seq")) {
                   ret!(("err", "seq_mismatch"))
                 } else {
-                  new hashCh, verifyCh in {
+                  new hashCh, verifyCh, verifyNewCh in {
                     blake2b256!(
                       "02".hexToBytes() ++ name ++ newPk ++ seq.toByteArray(),
                       *hashCh
                     ) |
                     for (@hash <- hashCh) {
                       secpVerify!(hash, sig, rec.get("current"), *verifyCh) |
-                      for (@valid <- verifyCh) {
-                        if (valid) {
-                          new ackCh in {
-                            @treeHashMap!("set", identitiesHandle, name, {
-                              "current": newPk,
-                              "history": rec.get("history") ++
-                                [{"pk": newPk, "op": "rotate", "seq": seq + 1}],
-                              "seq": seq + 1
-                            }, *ackCh) |
-                            for (_ <- ackCh) {
-                              ret!(("ok", seq + 1))
+                      secpVerify!(hash, newSig, newPk, *verifyNewCh) |
+                      for (@valid <- verifyCh & @validNew <- verifyNewCh) {
+                        match (valid, validNew) {
+                          (true, true) => {
+                            new ackCh in {
+                              @treeHashMap!("set", identitiesHandle, name, {
+                                "current": newPk,
+                                "history": rec.get("history") ++
+                                  [{"pk": newPk, "op": "rotate", "seq": seq + 1}],
+                                "seq": seq + 1
+                              }, *ackCh) |
+                              for (_ <- ackCh) {
+                                ret!(("ok", seq + 1))
+                              }
                             }
                           }
-                        } else {
-                          ret!(("err", "bad_signature"))
+                          _ => ret!(("err", "bad_signature"))
                         }
                       }
                     }
@@ -189,27 +193,28 @@ in {
     }
     |
 
-    // admin_relink(name, newPk, seq, adminEvidence, sig, ret)
+    // admin_relink(name, newPk, seq, adminEvidence, sig, newSig, ret)
     //
     // The compromised-key path (REG-D3, REG-AC9). Signed by the registry's
-    // admin pk (baked in at deploy time). adminEvidence is recorded verbatim
-    // in history and never validated.
+    // admin pk (baked in at deploy time) and also by the new key, so an
+    // admin cannot relink an identity onto a key the operator does not
+    // control. adminEvidence is recorded verbatim in history and never
+    // validated.
     //
     // payload = 0x03 || name(32) || new_pk(65) || seq.toByteArray() || adminEvidence
-    // sig     = secp256k1 signature over blake2b256(payload), signed by the
-    //           admin pk.
+    // sig     = secp256k1 signature over blake2b256(payload), by the admin pk.
+    // newSig  = secp256k1 signature over the same hash, by the new key.
     //
     // Responses:
     //   ("err", "unknown_name") when `name` is not registered.
     //   ("err", "seq_mismatch") when `seq` does not match the record's current
     //   seq.
-    //   ("err", "bad_signature") when the signature does not verify under the
-    //   registry's admin key.
+    //   ("err", "bad_signature") when either signature does not verify.
     //   ("ok", newSeq) on success, where newSeq = seq + 1. The record's
     //   current key becomes newPk, the history grows by one entry carrying
     //   the adminEvidence, and seq is bumped.
     contract @[*identityRegistry, "admin_relink"]
-      (@name, @newPk, @seq, @adminEvidence, @sig, ret) = {
+      (@name, @newPk, @seq, @adminEvidence, @sig, @newSig, ret) = {
       for (@adminPkVal <<- adminPk) {
         for (@(treeHashMap, identitiesHandle) <<- identities) {
           new existingCh in {
@@ -221,7 +226,7 @@ in {
                   if (seq != rec.get("seq")) {
                     ret!(("err", "seq_mismatch"))
                   } else {
-                    new hashCh, verifyCh in {
+                    new hashCh, verifyCh, verifyNewCh in {
                       blake2b256!(
                         "03".hexToBytes() ++
                           name ++
@@ -232,22 +237,24 @@ in {
                       ) |
                       for (@hash <- hashCh) {
                         secpVerify!(hash, sig, adminPkVal, *verifyCh) |
-                        for (@valid <- verifyCh) {
-                          if (valid) {
-                            new ackCh in {
-                              @treeHashMap!("set", identitiesHandle, name, {
-                                "current": newPk,
-                                "history": rec.get("history") ++
-                                  [{"pk": newPk, "op": "admin_relink", "seq": seq + 1,
-                                    "admin_evidence": adminEvidence}],
-                                "seq": seq + 1
-                              }, *ackCh) |
-                              for (_ <- ackCh) {
-                                ret!(("ok", seq + 1))
+                        secpVerify!(hash, newSig, newPk, *verifyNewCh) |
+                        for (@valid <- verifyCh & @validNew <- verifyNewCh) {
+                          match (valid, validNew) {
+                            (true, true) => {
+                              new ackCh in {
+                                @treeHashMap!("set", identitiesHandle, name, {
+                                  "current": newPk,
+                                  "history": rec.get("history") ++
+                                    [{"pk": newPk, "op": "admin_relink", "seq": seq + 1,
+                                      "admin_evidence": adminEvidence}],
+                                  "seq": seq + 1
+                                }, *ackCh) |
+                                for (_ <- ackCh) {
+                                  ret!(("ok", seq + 1))
+                                }
                               }
                             }
-                          } else {
-                            ret!(("err", "bad_signature"))
+                            _ => ret!(("err", "bad_signature"))
                           }
                         }
                       }

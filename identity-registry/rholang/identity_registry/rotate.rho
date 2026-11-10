@@ -6,6 +6,7 @@ new ret, lookup(`rho:registry:lookup`), registryCh in {
       "{{new_pk_hex}}".hexToBytes(),
       {{seq}},
       "{{sig_hex}}".hexToBytes(),
+      "{{new_sig_hex}}".hexToBytes(),
       *ret
     ) |
     for (@replyProc <- ret) {

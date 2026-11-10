@@ -36,8 +36,8 @@ deploy:
 #   make keygen
 #   make register
 #   make register SK=<32-byte hex> NONCE=<32-byte hex>
-#   make rotate NAME=<32-byte hex> CURRENT_SK=<32-byte hex> NEW_PK=<65-byte hex> SEQ=<n>
-#   make admin-relink NAME=<32-byte hex> NEW_PK=<65-byte hex> SEQ=<n> EVIDENCE=<hex>
+#   make rotate NAME=<32-byte hex> CURRENT_SK=<32-byte hex> NEW_SK=<32-byte hex> SEQ=<n>
+#   make admin-relink NAME=<32-byte hex> NEW_SK=<32-byte hex> SEQ=<n> EVIDENCE=<hex>
 #   make resolve-current NAME=<32-byte hex>
 #   make resolve-history NAME=<32-byte hex>
 
@@ -50,13 +50,13 @@ rotate:
 	cargo run --bin registry_cli -- rotate \
 		--name $(NAME) \
 		--current-sk $(CURRENT_SK) \
-		--new-pk $(NEW_PK) \
+		--new-sk $(NEW_SK) \
 		--seq $(SEQ)
 
 admin-relink:
 	cargo run --bin registry_cli -- admin-relink \
 		--name $(NAME) \
-		--new-pk $(NEW_PK) \
+		--new-sk $(NEW_SK) \
 		--seq $(SEQ) \
 		--evidence $(EVIDENCE)
 

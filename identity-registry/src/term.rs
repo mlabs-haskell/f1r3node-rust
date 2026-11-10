@@ -38,6 +38,7 @@ pub fn rotate_term(
     new_pk: &[u8],
     seq: u64,
     sig: &[u8],
+    new_sig: &[u8],
     reply_slot: &str,
 ) -> String {
     ROTATE_TEMPLATE
@@ -46,6 +47,7 @@ pub fn rotate_term(
         .replace("{{new_pk_hex}}", &hex::encode(new_pk))
         .replace("{{seq}}", &seq.to_string())
         .replace("{{sig_hex}}", &hex::encode(sig))
+        .replace("{{new_sig_hex}}", &hex::encode(new_sig))
         .replace("{{reply_slot}}", reply_slot)
 }
 
@@ -56,6 +58,7 @@ pub fn admin_relink_term(
     seq: u64,
     admin_evidence: &[u8],
     sig: &[u8],
+    new_sig: &[u8],
     reply_slot: &str,
 ) -> String {
     ADMIN_RELINK_TEMPLATE
@@ -65,6 +68,7 @@ pub fn admin_relink_term(
         .replace("{{seq}}", &seq.to_string())
         .replace("{{admin_evidence_hex}}", &hex::encode(admin_evidence))
         .replace("{{sig_hex}}", &hex::encode(sig))
+        .replace("{{new_sig_hex}}", &hex::encode(new_sig))
         .replace("{{reply_slot}}", reply_slot)
 }
 

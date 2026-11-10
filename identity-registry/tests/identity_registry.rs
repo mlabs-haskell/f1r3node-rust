@@ -180,9 +180,9 @@ async fn rotate_accepts_new_rejects_old_name_stable() {
     let nonce = fresh_nonce();
     let name = client.register(&sk1, &nonce).await.expect("register");
 
-    let (_, pk2) = fresh_keypair();
+    let (sk2, pk2) = fresh_keypair();
     let new_seq = client
-        .rotate(&sk1, &name, &uncompressed_pk_bytes(&pk2), 0)
+        .rotate(&sk1, &name, &sk2, 0)
         .await
         .expect("rotate");
     assert_eq!(new_seq, 1);
@@ -193,8 +193,8 @@ async fn rotate_accepts_new_rejects_old_name_stable() {
     assert_eq!(resolved.seq, 1);
 
     // The old key is rejected for further rotation.
-    let (_, pk3) = fresh_keypair();
-    let old_key_rotation = client.rotate(&sk1, &name, &uncompressed_pk_bytes(&pk3), 1).await;
+    let (sk3, _pk3) = fresh_keypair();
+    let old_key_rotation = client.rotate(&sk1, &name, &sk3, 1).await;
     assert!(
         matches!(old_key_rotation, Err(IdentityRegistryError::Rejected(ref r)) if r == "bad_signature"),
         "expected bad_signature when rotating with the superseded key, got {old_key_rotation:?}"
@@ -225,9 +225,9 @@ async fn rotation_adds_key_not_identity() {
     let history_before = client.resolve_history(&name).await.expect("history before");
     assert_eq!(history_before.len(), 1);
 
-    let (_, pk2) = fresh_keypair();
+    let (sk2, _pk2) = fresh_keypair();
     client
-        .rotate(&sk1, &name, &uncompressed_pk_bytes(&pk2), 0)
+        .rotate(&sk1, &name, &sk2, 0)
         .await
         .expect("rotate");
 
@@ -237,9 +237,9 @@ async fn rotation_adds_key_not_identity() {
 
     // A rotation not signed by the current key is rejected.
     let (sk_stranger, _) = fresh_keypair();
-    let (_, pk3) = fresh_keypair();
+    let (sk3, _pk3) = fresh_keypair();
     let result = client
-        .rotate(&sk_stranger, &name, &uncompressed_pk_bytes(&pk3), 1)
+        .rotate(&sk_stranger, &name, &sk3, 1)
         .await;
     assert!(
         matches!(result, Err(IdentityRegistryError::Rejected(ref r)) if r == "bad_signature"),
@@ -293,12 +293,12 @@ async fn record_is_append_only() {
 
     let (sk2, pk2) = fresh_keypair();
     client
-        .rotate(&sk1, &name, &uncompressed_pk_bytes(&pk2), 0)
+        .rotate(&sk1, &name, &sk2, 0)
         .await
         .expect("rotate 1");
-    let (_, pk3) = fresh_keypair();
+    let (sk3, pk3) = fresh_keypair();
     client
-        .rotate(&sk2, &name, &uncompressed_pk_bytes(&pk3), 1)
+        .rotate(&sk2, &name, &sk3, 1)
         .await
         .expect("rotate 2");
 
@@ -334,10 +334,10 @@ async fn admin_relink_works_and_is_bounded() {
     // The deployer of the contract is the admin (REG-D3). Signing with that
     // key succeeds and records the evidence.
     let admin = admin_sk();
-    let (_, pk_new) = fresh_keypair();
+    let (sk_new, pk_new) = fresh_keypair();
     let evidence = b"out_of_band_proof".to_vec();
     let new_seq = client
-        .admin_relink(&admin, &name, &uncompressed_pk_bytes(&pk_new), 0, &evidence)
+        .admin_relink(&admin, &name, &sk_new, 0, &evidence)
         .await
         .expect("admin relink");
     assert_eq!(new_seq, 1);
@@ -350,9 +350,9 @@ async fn admin_relink_works_and_is_bounded() {
 
     // Signed by any other key: rejected.
     let (sk_stranger, _) = fresh_keypair();
-    let (_, pk_newer) = fresh_keypair();
+    let (sk_newer, _pk_newer) = fresh_keypair();
     let result = client
-        .admin_relink(&sk_stranger, &name, &uncompressed_pk_bytes(&pk_newer), 1, b"evidence2")
+        .admin_relink(&sk_stranger, &name, &sk_newer, 1, b"evidence2")
         .await;
     assert!(
         matches!(result, Err(IdentityRegistryError::Rejected(ref r)) if r == "bad_signature"),
