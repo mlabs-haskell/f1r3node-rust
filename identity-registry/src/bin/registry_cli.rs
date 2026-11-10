@@ -4,7 +4,6 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use identity_registry::IdentityRegistryClient;
 use identity_registry::payload::{NAME_LEN, NONCE_LEN};
 use std::env;
-use std::fs;
 
 const DEFAULT_NODE_HOST: &str = "127.0.0.1";
 const DEFAULT_GRPC_PORT: u16 = 40422;
@@ -12,9 +11,9 @@ const DEFAULT_GRPC_PORT: u16 = 40422;
 #[derive(Parser)]
 #[command(name = "registry-cli", about = "Identity registry CLI")]
 struct Cli {
-    /// URI of a deployed identity registry contract. Required for every
-    /// subcommand except `deploy`.
-    #[arg(long, env = "IDENTITY_REGISTRY_URI")]
+    /// URI of the identity registry contract. Defaults to the registry
+    /// deployed at genesis.
+    #[arg(long, env = "IDENTITY_REGISTRY_URI", default_value = "rho:system:identityRegistry")]
     registry_uri: Option<String>,
 
     /// Host of the F1R3FLY validator node.
@@ -31,13 +30,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Deploy the identity registry Rholang contract. The URI the contract
-    /// publishes under appears in the node's own stdout after finalisation.
-    Deploy {
-        /// Path to the Rholang source.
-        #[arg(long, default_value = "rholang/identity_registry.rho")]
-        contract_path: String,
-    },
     /// Register a new identity. Prints the derived name as hex.
     Register {
         /// Identity secret key (32-byte hex). Generated fresh if omitted.
@@ -68,7 +60,8 @@ enum Command {
         seq: u64,
     },
     /// Admin-relink an identity when its current key is compromised. The
-    /// signer is the deployer of the contract. Reads F1R3FLY_SIGNING_KEY.
+    /// signer must be the registry admin (the genesis
+    /// identity-registry-admin-public-key). Reads F1R3FLY_SIGNING_KEY.
     AdminRelink {
         /// Identity name (32-byte hex).
         #[arg(long)]
@@ -126,17 +119,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     match cli.command {
-        Command::Deploy { contract_path } => {
-            let rho_source = fs::read_to_string(&contract_path)
-                .map_err(|e| format!("could not read {contract_path}: {e}"))?;
-            let (block_hash, uri) = client.deploy_contract(&rho_source).await?;
-            println!("Deployed. Block hash: {block_hash}");
-            println!("Identity Registry URI: {uri}");
-            println!(
-                "Pass the URI as --registry-uri (or set IDENTITY_REGISTRY_URI in the env) \
-                 on subsequent commands."
-            );
-        }
         Command::Register { sk, nonce } => {
             let sk_bytes = match sk {
                 Some(s) => parse_hex_array::<32>(&s, "sk")?,

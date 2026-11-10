@@ -59,6 +59,7 @@ mod tests {
                 native_token_name: "F1R3CAP".to_string(),
                 native_token_symbol: "F1R3".to_string(),
                 native_token_decimals: 8,
+                identity_registry_admin_public_key: casper::rust::genesis::contracts::standard_deploys::DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEY.to_string(),
             },
             genesis_ceremony: GenesisCeremony {
                 required_signatures: 0,

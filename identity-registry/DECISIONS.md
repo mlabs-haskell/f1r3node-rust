@@ -8,6 +8,7 @@
   - [IR-D4. The identities store is backed by the system TreeHashMap at depth 3](#ir-d4-the-identities-store-is-backed-by-the-system-treehashmap-at-depth-3)
   - [IR-D5. Rotate and admin relink require a signature by the new key](#ir-d5-rotate-and-admin-relink-require-a-signature-by-the-new-key)
   - [IR-D6. Register serializes through a global lock](#ir-d6-register-serializes-through-a-global-lock)
+  - [IR-D7. The registry is deployed at genesis and the admin key is a genesis parameter](#ir-d7-the-registry-is-deployed-at-genesis-and-the-admin-key-is-a-genesis-parameter)
   - [Notes on defaults from the spec](#notes-on-defaults-from-the-spec)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
@@ -174,15 +175,37 @@ acceptable because registration is rare compared to resolve and rotate.
 The lock should be removed once the fresh-leaf race is caught by the
 merger upstream.
 
+## IR-D7. The registry is deployed at genesis and the admin key is a genesis parameter
+
+Context. The roadmap puts the registry in the genesis block. Genesis
+deploys are signed by keys whose private keys are constants in the node
+source. If the admin were still the deployer, anyone who reads the source
+could sign an admin relink and take over any identity.
+
+Decision. The contract is a blessed genesis contract,
+`casper/src/main/resources/IdentityRegistry.rhox`. It registers itself
+with `insertSigned` and is reachable at `rho:system:identityRegistry`.
+The admin public key comes from the genesis config field
+`identity-registry-admin-public-key` and is spliced into the contract.
+
+Reasoning. A config field keeps the admin key out of the source, like the
+PoS multi-sig keys. Every validator rebuilds the genesis deploys from its
+own config, so a disagreement on the admin key fails the genesis
+ceremony.
+
+Impact. The client addresses `rho:system:identityRegistry` by default,
+and the standalone deploy path is gone. The default in `defaults.conf` is
+the docker dev bootstrap key, whose private key is published. Production
+shards must set their own key. Changing the key needs a new genesis.
+
 ## Notes on defaults from the spec
 
 These are not independent decisions, but recording them here keeps
 surprise off the page.
 
-- The administrator for the prototype is the party who deployed the
-  contract. The contract reads the administrator key from the deployer
-  identity at deploy time. The spec allows this to become a quorum later.
-  Only the admin relink signature check would need to change.
+- The administrator for the prototype is a single key set at genesis
+  (IR-D7). The spec allows this to become a quorum later. Only the admin
+  relink signature check would need to change.
 - The administrator evidence supplied with an admin relink is stored
   exactly as the caller sent it. The contract does not validate it, per
   the spec.

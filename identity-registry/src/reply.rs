@@ -141,12 +141,3 @@ pub fn extract_emap(par: &Par) -> Result<&EMap, IdentityRegistryError> {
     }
     Err(IdentityRegistryError::ResponseParse("expected EMap".into()))
 }
-
-pub fn extract_guri(par: &Par) -> Result<String, IdentityRegistryError> {
-    for e in &par.exprs {
-        if let Some(ExprInstance::GUri(u)) = &e.expr_instance {
-            return Ok(u.clone());
-        }
-    }
-    Err(IdentityRegistryError::ResponseParse("expected GUri".into()))
-}

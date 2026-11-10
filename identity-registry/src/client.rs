@@ -1,12 +1,12 @@
-// Thin wrapper over F1r3flyApi for deploying the identity registry contract
-// and invoking its operations.
+// Thin wrapper over F1r3flyApi for invoking the identity registry contract
+// operations.
 
 use crate::error::IdentityRegistryError;
 use crate::payload::{
     NAME_LEN, NONCE_LEN, PK_LEN, admin_relink_payload, register_payload, rotate_payload,
 };
 use crate::reply::{
-    extract_elist, extract_emap, extract_gbytearray, extract_gint, extract_gstring, extract_guri,
+    extract_elist, extract_emap, extract_gbytearray, extract_gint, extract_gstring,
     fetch_reply, parse_tagged_reply,
 };
 use crate::signing::{signature_der, sign_payload, uncompressed_pk_bytes};
@@ -47,9 +47,8 @@ pub struct IdentityRegistryClient {
 
 impl IdentityRegistryClient {
     /// Builds a client against a running F1R3FLY validator node.
-    /// `registry_uri` is `None` when the contract has not been deployed yet
-    /// (used by the deploy helper) and `Some(uri)` for calls that operate on
-    /// an already-deployed registry.
+    /// `registry_uri` is the registry to address, usually
+    /// `rho:system:identityRegistry`.
     pub fn new(
         signing_key: &str,
         node_host: &str,
@@ -71,24 +70,6 @@ impl IdentityRegistryClient {
             registry_uri,
             post_deploy_wait: Duration::ZERO,
         })
-    }
-
-    /// Deploys the identity registry contract and returns the finalised
-    /// block hash together with the URI the registry published under. The
-    /// contract template contains a `{{uri_slot}}` placeholder that this
-    /// method substitutes with a fresh forgeable slot name, so each deploy
-    /// publishes to its own slot and the URI can be fetched back
-    /// programmatically.
-    pub async fn deploy_contract(
-        &self,
-        rho_template: &str,
-    ) -> Result<(String, String), IdentityRegistryError> {
-        let slot = new_reply_slot();
-        let rho_source = rho_template.replace("{{uri_slot}}", &slot);
-        let block_hash = self.deploy(&rho_source).await?;
-        let uri_par = fetch_reply(&self.node_host, self.grpc_port, &slot, &block_hash).await?;
-        let uri = extract_guri(&uri_par)?;
-        Ok((block_hash, uri))
     }
 
     fn require_uri(&self) -> Result<&str, IdentityRegistryError> {

@@ -1,4 +1,21 @@
-// Identity Registry.
+/*
+ The table below describes the required computations and their dependencies
+
+ No. | Dependency | Computation method | Result
+ ----+------------+--------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------
+ 1.  |            | given              | sk = b461b0c47b597a5eb9c9e38856533e802954a8e6ed1b6dd3f34e891b4912c8b1
+ 2.  |            | given              | timestamp = 1794328772185
+ 3.  |            | lastNonce          | nonce = 9223372036854775807
+ 4.  | 1,         | secp256k1          | pk = 04b5e7d2c17c8a08b1c5983cd6def4124faa345698eada20c91f0a47406f8827c9cdb80f2e514b4b03b2d3a73501c500f675c756867dcbf9fcad57fa7412acb22e
+ 5.  | 2, 4, 3,   | registry           | value = (1794328772185, 04b5e7d2c17c8a08b1c5983cd6def4124faa345698eada20c91f0a47406f8827c9cdb80f2e514b4b03b2d3a73501c500f675c756867dcbf9fcad57fa7412acb22e, 9223372036854775807)
+ 6.  | 5,         | protobuf           | toSign = 2a65aa01620a092a0710b2f9a1e5b8680a462a44ca014104b5e7d2c17c8a08b1c5983cd6def4124faa345698eada20c91f0a47406f8827c9cdb80f2e514b4b03b2d3a73501c500f675c756867dcbf9fcad57fa7412acb22e0a0d2a0b10feffffffffffffffff01
+ 7.  | 6, 1,      | secp256k1          | sig = 3045022100cb64110905f0634967f9f6e3e20eb998b86dffd21121dd94848bc2f2355ca29202206fce173639fdf67d1fbcb0d6c06154193d9d4bf1b3c8ca857f18f2be05c27863
+ 8.  | 4,         | registry           | uri = rho:id:csx8wjodypw4iet7sejtojrys9ampbn81sz3tqj9z6z3rymu6udhhb
+ ----+------------+--------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------
+ */
+
+// Identity Registry, deployed at genesis and registered at
+// `rho:system:identityRegistry`.
 
 // Per-operation payloads. For each operation the Rust client and this
 // contract construct the same payload bytes from a shared set of structured
@@ -15,30 +32,31 @@
 
 new
   identityRegistry,
-  identityRegistryUri,
-  insertArbitrary(`rho:registry:insertArbitrary`),
-  stdout(`rho:io:stdout`),
-  deployerId(`rho:rchain:deployerId`),
+  rs(`rho:registry:insertSigned:secp256k1`),
+  uriOut,
   secpVerify(`rho:crypto:secp256k1Verify`),
   blake2b256(`rho:crypto:blake2b256Hash`),
   lookup(`rho:registry:lookup`)
 in {
-  insertArbitrary!(*identityRegistry, *identityRegistryUri) |
-  for (@uri <- identityRegistryUri) {
-    stdout!("Identity Registry URI: ${uri}" %% {"uri": uri}) |
-    @"{{uri_slot}}"!(uri)
-  }
+  // The raw name is published, not a bundle: callers address the contracts
+  // as @[*registry, "<op>"], which only matches the unbundled name.
+  rs!(
+    "04b5e7d2c17c8a08b1c5983cd6def4124faa345698eada20c91f0a47406f8827c9cdb80f2e514b4b03b2d3a73501c500f675c756867dcbf9fcad57fa7412acb22e".hexToBytes(),
+    (9223372036854775807, *identityRegistry),
+    "3045022100cb64110905f0634967f9f6e3e20eb998b86dffd21121dd94848bc2f2355ca29202206fce173639fdf67d1fbcb0d6c06154193d9d4bf1b3c8ca857f18f2be05c27863".hexToBytes(),
+    *uriOut
+  )
   |
 
   new identities, adminPk, registerLock in {
-    // REG-D3: the admin is the deployer. Baked in once and never changes in
-    // the prototype. The deployerId's Par representation prefixes the raw
-    // 65-byte secp256k1 pubkey with 6 bytes of wrapper.
+    // REG-D3: the admin key comes from the genesis config
+    // (`identity-registry-admin-public-key`). Baked in once and never
+    // changes in the prototype.
     //
     // TODO: Update to a multi-signer admin (quorum). The spec stubs this as a
     // single admin key for the prototype (D32). Swapping it out should only
     // change the signer set in admin_relink's sig check.
-    adminPk!(*deployerId.toByteArray().slice(6, 71)) |
+    adminPk!("$$identityRegistryAdminPublicKey$$".hexToBytes()) |
 
     // Initial token for the register lock. See the fresh-leaf race TODO
     // below for why this exists.

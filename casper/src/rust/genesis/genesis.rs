@@ -36,6 +36,9 @@ pub struct Genesis {
     pub native_token_symbol: String,
     /// Number of decimal places for native token display (dust per token = 10^decimals).
     pub native_token_decimals: u32,
+    /// Hex-encoded uncompressed secp256k1 public key of the identity
+    /// registry administrator. Baked into the `IdentityRegistry` contract.
+    pub identity_registry_admin_public_key: String,
     /// Static FsGenesis bundle entries — one per operator-provisioned
     /// (file or directory, logical name) pair that user deploys can
     /// resolve via `Fs.openFile(name, ...)` / `Fs.openDir(name, ...)`.
@@ -83,6 +86,7 @@ impl Genesis {
         native_token_name: &str,
         native_token_symbol: &str,
         native_token_decimals: u32,
+        identity_registry_admin_public_key: &str,
         fs_bundle: &[super::contracts::fs_genesis::BundleEntry],
         consensus_fs_snapshot_cadence: Option<u64>,
     ) -> Vec<Signed<DeployData>> {
@@ -131,6 +135,8 @@ impl Genesis {
             native_token_decimals,
             shard_id,
         );
+        let identity_registry =
+            standard_deploys::identity_registry(identity_registry_admin_public_key, shard_id);
         let pos_generator = standard_deploys::pos_generator(pos_params, shard_id);
         // File I/O FIP MVP: shared-Fs model with empty static bundle +
         // no snapshot cadence.  Config-driven bundle / cadence
@@ -149,7 +155,7 @@ impl Genesis {
         let fs_generator =
             standard_deploys::fs_generator(shard_id, fs_bundle, consensus_fs_snapshot_cadence);
 
-        let mut all_deploys = Vec::with_capacity(13 + vault_deploys.len());
+        let mut all_deploys = Vec::with_capacity(14 + vault_deploys.len());
         all_deploys.push(registry);
         all_deploys.push(versioned_registry);
         all_deploys.push(list_ops);
@@ -161,6 +167,7 @@ impl Genesis {
         all_deploys.push(multi_sig_system_vault);
         all_deploys.push(stack);
         all_deploys.push(token_metadata);
+        all_deploys.push(identity_registry);
         all_deploys.extend(vault_deploys);
         all_deploys.push(pos_generator);
         all_deploys.push(fs_generator);
@@ -176,6 +183,7 @@ impl Genesis {
         native_token_name: &str,
         native_token_symbol: &str,
         native_token_decimals: u32,
+        identity_registry_admin_public_key: &str,
         fs_bundle: &[super::contracts::fs_genesis::BundleEntry],
         consensus_fs_snapshot_cadence: Option<u64>,
     ) -> Vec<Signed<DeployData>> {
@@ -190,6 +198,7 @@ impl Genesis {
             native_token_name,
             native_token_symbol,
             native_token_decimals,
+            identity_registry_admin_public_key,
             fs_bundle,
             consensus_fs_snapshot_cadence,
         )
@@ -207,6 +216,7 @@ impl Genesis {
             &genesis.native_token_name,
             &genesis.native_token_symbol,
             genesis.native_token_decimals,
+            &genesis.identity_registry_admin_public_key,
             &genesis.fs_bundle,
             genesis.consensus_fs_snapshot_cadence,
         );
@@ -330,6 +340,7 @@ mod tests {
             "F1R3CAP",
             "F1R3",
             18,
+            standard_deploys::DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEY,
             &[],
             None,
         );
