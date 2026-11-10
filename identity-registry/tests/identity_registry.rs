@@ -1,0 +1,361 @@
+// Integration tests for the identity registry.
+// Requires:
+//   - A running F1R3FLY cluster on 127.0.0.1:40422 (gRPC internal)
+//   - F1R3FLY_SIGNING_KEY env var set to a 32-byte hex secp256k1 key with
+//     REV balance on that cluster
+//
+// Run with: cargo test --features integration_tests -- --nocapture
+
+#![cfg(feature = "integration_tests")]
+
+use rand::RngCore;
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use identity_registry::{IdentityRegistryClient, IdentityRegistryError};
+use identity_registry::payload::{
+    NAME_LEN, NONCE_LEN, derive_name, register_payload,
+};
+use identity_registry::reply::{fetch_reply, parse_tagged_reply};
+use identity_registry::signing::{sign_payload, signature_der, uncompressed_pk_bytes};
+use identity_registry::term::{new_reply_slot, register_term};
+use std::env;
+use std::fs;
+use std::sync::OnceLock;
+use std::time::Duration;
+use tokio::sync::OnceCell;
+
+const NODE_HOST: &str = "127.0.0.1";
+const GRPC_PORT: u16 = 40422;
+const CONTRACT_PATH: &str = "rholang/identity_registry.rho";
+
+// --- Harness -----------------------------------------------------------------
+
+fn signing_key() -> &'static str {
+    static SK: OnceLock<String> = OnceLock::new();
+    SK.get_or_init(|| {
+        env::var("F1R3FLY_SIGNING_KEY").expect("F1R3FLY_SIGNING_KEY must be set")
+    })
+    .as_str()
+}
+
+/// 5s between deploys so each test op lands in its own block. Avoids the
+/// lost-update / empty-reply pattern that shows up when the cluster batches
+/// several pending deploys into one block.
+const POST_DEPLOY_WAIT: Duration = Duration::from_secs(5);
+
+/// Deploys the identity registry contract exactly once per test process and
+/// caches the URI. Every test shares the same registry but operates on its
+/// own fresh keypair/name so they don't interfere.
+async fn shared_uri() -> &'static str {
+    static URI: OnceCell<String> = OnceCell::const_new();
+    URI.get_or_init(|| async {
+        let mut client = IdentityRegistryClient::new(signing_key(), NODE_HOST, GRPC_PORT, None)
+            .expect("init client");
+        client.post_deploy_wait = POST_DEPLOY_WAIT;
+        let rho = fs::read_to_string(CONTRACT_PATH).expect("read contract source");
+        let (_block_hash, uri) =
+            client.deploy_contract(&rho).await.expect("deploy identity registry");
+        uri
+    })
+    .await
+    .as_str()
+}
+
+async fn test_client() -> IdentityRegistryClient {
+    let uri = shared_uri().await.to_string();
+    let mut client = IdentityRegistryClient::new(signing_key(), NODE_HOST, GRPC_PORT, Some(uri))
+        .expect("init client");
+    client.post_deploy_wait = POST_DEPLOY_WAIT;
+    client
+}
+
+fn fresh_keypair() -> (SecretKey, PublicKey) {
+    Secp256k1::new().generate_keypair(&mut rand::rng())
+}
+
+fn fresh_nonce() -> [u8; NONCE_LEN] {
+    let mut buf = [0u8; NONCE_LEN];
+    rand::rng().fill_bytes(&mut buf);
+    buf
+}
+
+fn admin_sk() -> SecretKey {
+    let bytes = hex::decode(signing_key()).expect("F1R3FLY_SIGNING_KEY is not valid hex");
+    let arr: [u8; 32] = bytes.try_into().expect("F1R3FLY_SIGNING_KEY must be 32 bytes");
+    SecretKey::from_byte_array(arr).expect("F1R3FLY_SIGNING_KEY is not a valid secp256k1 key")
+}
+
+// --- REG-AC1 -----------------------------------------------------------------
+
+/// A registration signed by a fresh keypair mints a name, and the name
+/// resolves to the registering key.
+#[cfg_attr(not(feature = "integration_tests"), ignore)]
+#[tokio::test]
+async fn register_mints_name_resolving_to_key() {
+    let client = test_client().await;
+    let (sk, pk) = fresh_keypair();
+    let nonce = fresh_nonce();
+
+    let name = client.register(&sk, &nonce).await.expect("register");
+
+    let resolved = client.resolve_current(&name).await.expect("resolve");
+    assert_eq!(resolved.pk, uncompressed_pk_bytes(&pk));
+    assert_eq!(resolved.seq, 0);
+}
+
+// --- REG-AC2 -----------------------------------------------------------------
+
+/// A payload signed by a different key mints no name, and the refusal is
+/// distinguishable from whatever the submission's own finalisation state is.
+#[cfg_attr(not(feature = "integration_tests"), ignore)]
+#[tokio::test]
+async fn bad_signature_registers_nothing() {
+    let client = test_client().await;
+    let (_sk_a, pk_a) = fresh_keypair();
+    let (sk_b, _pk_b) = fresh_keypair();
+    let nonce = fresh_nonce();
+
+    // Build register payload claiming pk_a but sign with sk_b.
+    let pk_a_bytes = uncompressed_pk_bytes(&pk_a);
+    let payload = register_payload(&pk_a_bytes, &nonce);
+    let sig = sign_payload(&payload, &sk_b);
+    let sig_der = signature_der(&sig);
+
+    let slot = new_reply_slot();
+    let uri = client.registry_uri.as_deref().unwrap();
+    let term = register_term(uri, &pk_a_bytes, &nonce, &sig_der, &slot);
+    let block_hash = client.deploy(&term).await.expect("deploy");
+    let reply = fetch_reply(&client.node_host, client.grpc_port, &slot, &block_hash)
+        .await
+        .expect("fetch reply");
+    let parsed = parse_tagged_reply(reply);
+    match parsed {
+        Err(IdentityRegistryError::Rejected(r)) => assert_eq!(r, "bad_signature"),
+        other => panic!("expected Rejected(bad_signature), got {other:?}"),
+    }
+
+    // Verify the name was not minted.
+    let expected_name = derive_name(&pk_a_bytes, &nonce);
+    let resolve_result = client.resolve_current(&expected_name).await;
+    assert!(
+        matches!(resolve_result, Err(IdentityRegistryError::Rejected(ref r)) if r == "unknown_name"),
+        "expected unknown_name, got {resolve_result:?}"
+    );
+}
+
+// --- REG-AC3 -----------------------------------------------------------------
+
+/// A second party resolves the first party's name to the keys linked to
+/// it. An unregistered name resolves to nothing.
+#[cfg_attr(not(feature = "integration_tests"), ignore)]
+#[tokio::test]
+async fn resolve_returns_keys_or_nothing() {
+    let client = test_client().await;
+    let (sk_a, pk_a) = fresh_keypair();
+    let nonce = fresh_nonce();
+    let name = client.register(&sk_a, &nonce).await.expect("register");
+
+    // A "second party" resolve: same client API, different caller intent.
+    let resolved = client.resolve_current(&name).await.expect("resolve");
+    assert_eq!(resolved.pk, uncompressed_pk_bytes(&pk_a));
+
+    let unknown = [0u8; NAME_LEN];
+    let result = client.resolve_current(&unknown).await;
+    assert!(
+        matches!(result, Err(IdentityRegistryError::Rejected(ref r)) if r == "unknown_name"),
+        "expected unknown_name, got {result:?}"
+    );
+}
+
+// --- REG-AC4 -----------------------------------------------------------------
+
+/// After a rotation signed by the current key, the new key is accepted for
+/// speaking as the identity and the old one is rejected. The name is the
+/// same before and after, and the old key is still readable as a previous
+/// key of that name.
+#[cfg_attr(not(feature = "integration_tests"), ignore)]
+#[tokio::test]
+async fn rotate_accepts_new_rejects_old_name_stable() {
+    let client = test_client().await;
+    let (sk1, pk1) = fresh_keypair();
+    let nonce = fresh_nonce();
+    let name = client.register(&sk1, &nonce).await.expect("register");
+
+    let (sk2, pk2) = fresh_keypair();
+    let new_seq = client
+        .rotate(&sk1, &name, &sk2, 0)
+        .await
+        .expect("rotate");
+    assert_eq!(new_seq, 1);
+
+    // The name is unchanged, and resolve now returns pk2.
+    let resolved = client.resolve_current(&name).await.expect("resolve");
+    assert_eq!(resolved.pk, uncompressed_pk_bytes(&pk2));
+    assert_eq!(resolved.seq, 1);
+
+    // The old key is rejected for further rotation.
+    let (sk3, _pk3) = fresh_keypair();
+    let old_key_rotation = client.rotate(&sk1, &name, &sk3, 1).await;
+    assert!(
+        matches!(old_key_rotation, Err(IdentityRegistryError::Rejected(ref r)) if r == "bad_signature"),
+        "expected bad_signature when rotating with the superseded key, got {old_key_rotation:?}"
+    );
+
+    // The old key is still readable in history.
+    let history = client.resolve_history(&name).await.expect("history");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].pk, uncompressed_pk_bytes(&pk1));
+    assert_eq!(history[0].op, "register");
+    assert_eq!(history[1].pk, uncompressed_pk_bytes(&pk2));
+    assert_eq!(history[1].op, "rotate");
+}
+
+// --- REG-AC5 -----------------------------------------------------------------
+
+/// Rotation leaves the number of names unchanged while the number of keys
+/// linked to the rotating name increases. A rotation not signed by the
+/// current key is rejected.
+#[cfg_attr(not(feature = "integration_tests"), ignore)]
+#[tokio::test]
+async fn rotation_adds_key_not_identity() {
+    let client = test_client().await;
+    let (sk1, _pk1) = fresh_keypair();
+    let nonce = fresh_nonce();
+    let name = client.register(&sk1, &nonce).await.expect("register");
+
+    let history_before = client.resolve_history(&name).await.expect("history before");
+    assert_eq!(history_before.len(), 1);
+
+    let (sk2, _pk2) = fresh_keypair();
+    client
+        .rotate(&sk1, &name, &sk2, 0)
+        .await
+        .expect("rotate");
+
+    let history_after = client.resolve_history(&name).await.expect("history after");
+    // Same name throughout. Key count grew by exactly one.
+    assert_eq!(history_after.len(), history_before.len() + 1);
+
+    // A rotation not signed by the current key is rejected.
+    let (sk_stranger, _) = fresh_keypair();
+    let (sk3, _pk3) = fresh_keypair();
+    let result = client
+        .rotate(&sk_stranger, &name, &sk3, 1)
+        .await;
+    assert!(
+        matches!(result, Err(IdentityRegistryError::Rejected(ref r)) if r == "bad_signature"),
+        "expected bad_signature when rotating with a stranger key, got {result:?}"
+    );
+}
+
+// --- REG-AC6 -----------------------------------------------------------------
+
+/// Submitting the same registration twice mints one name.
+#[cfg_attr(not(feature = "integration_tests"), ignore)]
+#[tokio::test]
+async fn double_registration_mints_one_name() {
+    let client = test_client().await;
+    let (sk, pk) = fresh_keypair();
+    let nonce = fresh_nonce();
+
+    let name1 = client.register(&sk, &nonce).await.expect("first register");
+    let name2 = client.register(&sk, &nonce).await.expect("second register");
+    assert_eq!(name1, name2);
+
+    // Only one entry in history for that name.
+    let history = client.resolve_history(&name1).await.expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].op, "register");
+    assert_eq!(history[0].pk, uncompressed_pk_bytes(&pk));
+}
+
+// --- REG-AC7 -----------------------------------------------------------------
+
+// "Capability by possession, not by table." The behavioural check is that a
+// party holding a key linked to a name can post in a reputation channel and
+// refute a claim. Both require the Ledger milestone, so this AC is deferred
+// to that milestone's test suite.
+//
+// What is testable here, and is covered by the other ACs: no operation in
+// this contract grants or consults a stored permission, and the only
+// gating is the signature check.
+//
+// --- REG-AC8 -----------------------------------------------------------------
+
+/// No operation removes a name or a key, and a claim signed under a
+/// superseded key stays readable and attributed to that key.
+#[cfg_attr(not(feature = "integration_tests"), ignore)]
+#[tokio::test]
+async fn record_is_append_only() {
+    let client = test_client().await;
+    let (sk1, pk1) = fresh_keypair();
+    let nonce = fresh_nonce();
+    let name = client.register(&sk1, &nonce).await.expect("register");
+
+    let (sk2, pk2) = fresh_keypair();
+    client
+        .rotate(&sk1, &name, &sk2, 0)
+        .await
+        .expect("rotate 1");
+    let (sk3, pk3) = fresh_keypair();
+    client
+        .rotate(&sk2, &name, &sk3, 1)
+        .await
+        .expect("rotate 2");
+
+    let history = client.resolve_history(&name).await.expect("history");
+    assert_eq!(history.len(), 3);
+
+    // All historical keys remain readable and in order, with the ops and
+    // seqs that produced them.
+    assert_eq!(history[0].pk, uncompressed_pk_bytes(&pk1));
+    assert_eq!(history[0].op, "register");
+    assert_eq!(history[0].seq, 0);
+    assert_eq!(history[1].pk, uncompressed_pk_bytes(&pk2));
+    assert_eq!(history[1].op, "rotate");
+    assert_eq!(history[1].seq, 1);
+    assert_eq!(history[2].pk, uncompressed_pk_bytes(&pk3));
+    assert_eq!(history[2].op, "rotate");
+    assert_eq!(history[2].seq, 2);
+}
+
+// --- REG-AC9 -----------------------------------------------------------------
+
+/// The administrator key can link a new key to an identity whose current
+/// key cannot sign, recording the evidence offered. The same operation
+/// signed by any other key is rejected.
+#[cfg_attr(not(feature = "integration_tests"), ignore)]
+#[tokio::test]
+async fn admin_relink_works_and_is_bounded() {
+    let client = test_client().await;
+    let (sk1, _pk1) = fresh_keypair();
+    let nonce = fresh_nonce();
+    let name = client.register(&sk1, &nonce).await.expect("register");
+
+    // The deployer of the contract is the admin (REG-D3). Signing with that
+    // key succeeds and records the evidence.
+    let admin = admin_sk();
+    let (sk_new, pk_new) = fresh_keypair();
+    let evidence = b"out_of_band_proof".to_vec();
+    let new_seq = client
+        .admin_relink(&admin, &name, &sk_new, 0, &evidence)
+        .await
+        .expect("admin relink");
+    assert_eq!(new_seq, 1);
+
+    let history = client.resolve_history(&name).await.expect("history");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].op, "admin_relink");
+    assert_eq!(history[1].pk, uncompressed_pk_bytes(&pk_new));
+    assert_eq!(history[1].admin_evidence.as_deref(), Some(&evidence[..]));
+
+    // Signed by any other key: rejected.
+    let (sk_stranger, _) = fresh_keypair();
+    let (sk_newer, _pk_newer) = fresh_keypair();
+    let result = client
+        .admin_relink(&sk_stranger, &name, &sk_newer, 1, b"evidence2")
+        .await;
+    assert!(
+        matches!(result, Err(IdentityRegistryError::Rejected(ref r)) if r == "bad_signature"),
+        "expected bad_signature when admin-relinking with a non-admin key, got {result:?}"
+    );
+}
