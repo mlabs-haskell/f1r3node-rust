@@ -1,3 +1,4 @@
+      // payload = 0x01 || pk(65) || nonce(32)
 /*
  The table below describes the required computations and their dependencies
 
@@ -17,11 +18,9 @@
 // Identity Registry, deployed at genesis and registered at
 // `rho:system:identityRegistry`.
 
-// Per-operation payloads. For each operation the Rust client and this
-// contract construct the same payload bytes from a shared set of structured
-// args. The client signs the digest locally, and the contract rebuilds the
-// payload from the args it receives on the wire and verifies the signature
-// against the digest.
+// Per-operation payloads. The client and the contract build the same bytes
+// from the call args. The client signs the digest, and the contract rebuilds
+// the payload and verifies the signature.
 //
 //   register:     0x01 || pk(65)   || nonce(32)                     == 98 bytes
 //   rotate:       0x02 || name(32) || new_pk(65) || seq.toByteArray()
@@ -52,39 +51,30 @@ in {
 
   for (@(_, ListOps) <- listOpsCh) {
     new identities, admins, registerLock in {
-      // REG-D3: the admin key comes from the genesis config
-      // (`identity-registry-admin-public-key`). Baked in once and never
-      // changes in the prototype.
-      //
-      // TODO: Update to a multi-signer admin (quorum). The spec stubs this as a
-      // single admin key for the prototype (D32). Swapping it out should only
-      // change the signer set in admin_relink's sig check.
+      // REG-D3: (Set of admin pks, quorum), fixed at genesis by
+      // `identity-registry-admin-public-keys` and `identity-registry-admin-quorum`.
       admins!(($$identityRegistryAdminPublicKeys$$.toSet(), $$identityRegistryAdminQuorum$$)) |
 
-      // Initial token for the register lock. See the fresh-leaf race TODO
-      // below for why this exists.
+      // Register lock token. See the fresh-leaf race FIXME below.
       registerLock!(Nil) |
 
       // The identity store. Keyed by name (32-byte ByteArray, == blake2b256(payload_register)).
       // Record shape:
       //   { "current": ByteArray(65),
-      //     "history": [{ "pk": ByteArray(65), "op": String, "seq": Int, "admin_evidence"?: ByteArray }, ...],
+      //     "history": [{ "pk": ByteArray(65), "op": String, "seq": Int, "admin_evidence"?: ByteArray, "admin_signers"?: [ByteArray(65)] }, ...],
       //     "seq":     Int
       //   }
       //
-      // Backed by the system TreeHashMap. depth = 3 gives 24 bits of key-path
-      // parallelization. Writes to distinct names commute via BitmaskOr on
-      // interior-node bitmaps, so concurrent register / rotate / admin_relink
-      // calls targeting different identities no longer serialize through one
-      // channel. identities holds the pair (TreeHashMap system contract, map
-      // handle) persistently, so every contract peeks it.
+      // Backed by the system TreeHashMap at depth 3 (IR-D4), so writes to
+      // different names do not serialize. identities holds
+      // (TreeHashMap, map handle), and every contract peeks it.
       //
       // FIXME: Fresh-leaf race. The TreeHashMap merger catches concurrent writes
       // to an existing leaf through the standard RSpace consume rule on the
       // leaf map, but two blocks that both create the same leaf for the first
-      // time can leave two Maps on the leaf channel. Mitigated for now by
-      // serializing register through a global registerLock. Remove once the
-      // merger catches this case.
+      // time can leave two Maps on the leaf channel. registerLock serializes
+      // register as a workaround (IR-D6). Remove it when the merger catches
+      // this case.
       new treeHashMapCh in {
         lookup!(`rho:lang:treeHashMap`, *treeHashMapCh) |
         for (treeHashMap <- treeHashMapCh) {
@@ -102,11 +92,8 @@ in {
       // payload = 0x01 || pk(65) || nonce(32) - built by the contract from the args.
       // sig     = secp256k1 signature over blake2b256(payload), under pk.
       //
-      // The 32-byte client-supplied nonce decouples the name from the pk so
-      // that the same key can back more than one identity under different
-      // nonces. Replay of a captured (pk, nonce, sig) still collapses to an
-      // idempotent no-op because the name is derived from the full payload
-      // (REG-AC6).
+      // The nonce lets one key back more than one identity (IR-D2). A replayed
+      // (pk, nonce, sig) gives the same name, so it is a no-op (REG-AC6).
       //
       // Responses:
       //   ("err", "bad_signature") when the signature does not verify under pk.
@@ -162,11 +149,7 @@ in {
       // sig     = secp256k1 signature over blake2b256(payload), by the
       //           identity's current key.
       // newSig  = secp256k1 signature over the same hash, by the new key.
-      //           Proves the submitter holds newPk, so an attacker cannot
-      //           rotate an identity onto a key they do not control.
-      //
-      // The contract builds `payload` itself from the args, so the client and
-      // the contract never disagree on canonical bytes.
+      //           Proves that the submitter holds newPk (IR-D5).
       //
       // Responses:
       //   ("err", "unknown_name") when `name` is not registered.
@@ -224,26 +207,29 @@ in {
       }
       |
 
-      // admin_relink(name, newPk, seq, adminEvidence, sig, newSig, ret)
+      // admin_relink(name, newPk, seq, adminEvidence, adminSigs, newSig, ret)
       //
-      // The compromised-key path (REG-D3, REG-AC9). Signed by the registry's
-      // admin pk (baked in at deploy time) and also by the new key, so an
-      // admin cannot relink an identity onto a key the operator does not
-      // control. adminEvidence is recorded verbatim in history and never
-      // validated.
+      // The compromised-key path (REG-D3, REG-AC9). Needs a quorum of admin
+      // signatures and a signature by the new key (IR-D5, IR-D7). adminEvidence
+      // is stored verbatim and never validated.
       //
-      // payload = 0x03 || name(32) || new_pk(65) || seq.toByteArray() || adminEvidence
-      // sig     = secp256k1 signature over blake2b256(payload), by the admin pk.
-      // newSig  = secp256k1 signature over the same hash, by the new key.
+      // payload   = 0x03 || name(32) || new_pk(65) || seq.toByteArray() || adminEvidence
+      // adminSigs = [(adminPk, sig), ...], where each sig is a secp256k1
+      //             signature over blake2b256(payload) by its adminPk.
+      // newSig    = secp256k1 signature over the same hash, by the new key.
+      //
+      // signers = the set of adminPks in the admin set whose sig verifies. A
+      // repeated pk counts once.
       //
       // Responses:
       //   ("err", "unknown_name") when `name` is not registered.
       //   ("err", "seq_mismatch") when `seq` does not match the record's current
       //   seq.
-      //   ("err", "bad_signature") when either signature does not verify.
+      //   ("err", "bad_signature") when fewer than quorum distinct admins
+      //   signed, or newSig does not verify.
       //   ("ok", newSeq) on success, where newSeq = seq + 1. The record's
       //   current key becomes newPk, the history grows by one entry carrying
-      //   the adminEvidence, and seq is bumped.
+      //   the adminEvidence and the admin signers, and seq is bumped.
       contract @[*identityRegistry, "admin_relink"]
         (@name, @newPk, @seq, @adminEvidence, @adminSigs, @newSig, ret) = {
         for (@(adminSet, quorum) <<- admins) {
@@ -314,9 +300,7 @@ in {
 
       // resolve_current(name, ret)
       //
-      // Returns the key currently authorised to sign for this identity plus
-      // its sequence number (bundled because a caller building a rotate payload
-      // needs both).
+      // Returns the current key and seq. A rotate payload needs both.
       //
       // Responses:
       //   ("err", "unknown_name")
@@ -343,7 +327,7 @@ in {
       //
       // Responses:
       //   ("err", "unknown_name")
-      //   ("ok", [{"pk", "op", "seq", "admin_evidence"?}, ...])
+      //   ("ok", [{"pk", "op", "seq", "admin_evidence"?, "admin_signers"?}, ...])
       contract @[*identityRegistry, "resolve_history"](@name, ret) = {
         for (@(treeHashMap, identitiesHandle) <<- identities) {
           new existingCh in {
