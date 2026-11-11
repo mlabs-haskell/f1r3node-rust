@@ -1,5 +1,5 @@
 .PHONY: firefly clear-firefly build test \
-        register rotate admin-relink resolve-current resolve-history keygen
+        register rotate admin-relink admin-sign resolve-current resolve-history keygen
 
 # Spin up a local F1r3fly shard via the workspace's docker compose. Copies
 # docker/.env from the shipped example on first run.
@@ -34,7 +34,11 @@ test:
 #   make register
 #   make register SK=<32-byte hex> NONCE=<32-byte hex>
 #   make rotate NAME=<32-byte hex> CURRENT_SK=<32-byte hex> NEW_SK=<32-byte hex> SEQ=<n>
-#   make admin-relink NAME=<32-byte hex> NEW_SK=<32-byte hex> SEQ=<n> EVIDENCE=<hex>
+#   make admin-sign ADMIN_SK=<32-byte hex> NAME=<32-byte hex> NEW_PK=<65-byte hex> SEQ=<n> EVIDENCE=<hex>
+#   make admin-relink NAME=<32-byte hex> NEW_SK=<32-byte hex> SEQ=<n> EVIDENCE=<hex> \
+#        [ADMIN_SKS="<sk1> <sk2>"] [ADMIN_SIGS="<pk1>:<sig1> <pk2>:<sig2>"]
+#     ADMIN_SIGS takes the admin-sign output of each admin. Give at least one
+#     of ADMIN_SKS and ADMIN_SIGS.
 #   make resolve-current NAME=<32-byte hex>
 #   make resolve-history NAME=<32-byte hex>
 
@@ -54,6 +58,16 @@ admin-relink:
 	cargo run --bin registry_cli -- admin-relink \
 		--name $(NAME) \
 		--new-sk $(NEW_SK) \
+		--seq $(SEQ) \
+		--evidence $(EVIDENCE) \
+		$(foreach sk,$(ADMIN_SKS),--admin-sk $(sk)) \
+		$(foreach sig,$(ADMIN_SIGS),--admin-sig $(sig))
+
+admin-sign:
+	cargo run --bin registry_cli -- admin-sign \
+		--admin-sk $(ADMIN_SK) \
+		--name $(NAME) \
+		--new-pk $(NEW_PK) \
 		--seq $(SEQ) \
 		--evidence $(EVIDENCE)
 

@@ -9,7 +9,7 @@ use crate::reply::{
     extract_elist, extract_emap, extract_gbytearray, extract_gint, extract_gstring,
     fetch_reply, parse_tagged_reply,
 };
-use crate::signing::{signature_der, sign_payload, uncompressed_pk_bytes};
+use crate::signing::{admin_sign, signature_der, sign_payload, uncompressed_pk_bytes};
 use crate::term::{
     admin_relink_term, new_reply_slot, register_term, resolve_current_term, resolve_history_term,
     rotate_term,
@@ -32,6 +32,7 @@ pub struct HistoryEntry {
     pub op: String,
     pub seq: u64,
     pub admin_evidence: Option<Vec<u8>>,
+    pub admin_signers: Option<Vec<[u8; PK_LEN]>>,
 }
 
 pub struct IdentityRegistryClient {
@@ -132,14 +133,32 @@ impl IdentityRegistryClient {
         gint_as_u64(&value, "new_seq")
     }
 
-    /// Signs and submits an admin_relink call. `admin_sk` is the admin's
-    /// secret key, which in the prototype equals the deployer's key.
-    /// `new_sk` signs the payload a second time as proof the new key
-    /// holder has consented to taking over the identity. Returns the new
-    /// seq on success.
+    /// Signs the admin_relink payload with each of `admin_sks` and submits it
+    /// with `admin_relink_with_sigs`. Returns the new seq.
     pub async fn admin_relink(
         &self,
-        admin_sk: &SecretKey,
+        admin_sks: &[SecretKey],
+        name: &[u8; NAME_LEN],
+        new_sk: &SecretKey,
+        seq: u64,
+        admin_evidence: &[u8],
+    ) -> Result<u64, IdentityRegistryError> {
+        let new_pk_bytes =
+            uncompressed_pk_bytes(&PublicKey::from_secret_key(&Secp256k1::new(), new_sk));
+        let admin_sigs: Vec<_> = admin_sks
+            .iter()
+            .map(|sk| admin_sign(sk, name, &new_pk_bytes, seq, admin_evidence))
+            .collect();
+        self.admin_relink_with_sigs(&admin_sigs, name, new_sk, seq, admin_evidence)
+            .await
+    }
+
+    /// Submits an admin_relink call with admin `(pk, sig)` pairs, for example
+    /// from `admin_sign`. `new_sk` signs the payload as proof of consent
+    /// (IR-D5). The deployer key only pays for the deploy. Returns the new seq.
+    pub async fn admin_relink_with_sigs(
+        &self,
+        admin_sigs: &[([u8; PK_LEN], Vec<u8>)],
         name: &[u8; NAME_LEN],
         new_sk: &SecretKey,
         seq: u64,
@@ -149,10 +168,11 @@ impl IdentityRegistryClient {
         let new_pk = PublicKey::from_secret_key(&Secp256k1::new(), new_sk);
         let new_pk_bytes = uncompressed_pk_bytes(&new_pk);
         let payload = admin_relink_payload(name, &new_pk_bytes, seq, admin_evidence);
-        let sig = sign_payload(&payload, admin_sk);
-        let sig_der = signature_der(&sig);
-        let new_sig = sign_payload(&payload, new_sk);
-        let new_sig_der = signature_der(&new_sig);
+        let admin_sig_refs: Vec<(&[u8], &[u8])> = admin_sigs
+            .iter()
+            .map(|(pk, sig)| (pk.as_slice(), sig.as_slice()))
+            .collect();
+        let new_sig_der = signature_der(&sign_payload(&payload, new_sk));
 
         let slot = new_reply_slot();
         let term = admin_relink_term(
@@ -161,7 +181,7 @@ impl IdentityRegistryClient {
             &new_pk_bytes,
             seq,
             admin_evidence,
-            &sig_der,
+            &admin_sig_refs,
             &new_sig_der,
             &slot,
         );
@@ -312,6 +332,7 @@ fn decode_history_entry(
     let mut op: Option<String> = None;
     let mut seq: Option<i64> = None;
     let mut admin_evidence: Option<Vec<u8>> = None;
+    let mut admin_signers: Option<Vec<[u8; PK_LEN]>> = None;
     for kv in &map.kvs {
         let key_par = kv
             .key
@@ -326,6 +347,15 @@ fn decode_history_entry(
             "op" => op = Some(extract_gstring(value)?),
             "seq" => seq = Some(extract_gint(value)?),
             "admin_evidence" => admin_evidence = Some(extract_gbytearray(value)?),
+            "admin_signers" => {
+                admin_signers = Some(
+                    extract_elist(value)?
+                        .ps
+                        .iter()
+                        .map(|p| bytes_to_array::<PK_LEN>(extract_gbytearray(p)?, "admin_signer"))
+                        .collect::<Result<_, _>>()?,
+                )
+            }
             _ => {}
         }
     }
@@ -342,5 +372,6 @@ fn decode_history_entry(
         op: op_str,
         seq: seq_val as u64,
         admin_evidence,
+        admin_signers,
     })
 }

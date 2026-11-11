@@ -57,17 +57,24 @@ pub fn admin_relink_term(
     new_pk: &[u8],
     seq: u64,
     admin_evidence: &[u8],
-    sig: &[u8],
+    admin_sigs: &[(&[u8], &[u8])],
     new_sig: &[u8],
     reply_slot: &str,
 ) -> String {
+    let admin_sigs = admin_sigs
+        .iter()
+        .map(|(pk, sig)| {
+            format!("(\"{}\".hexToBytes(), \"{}\".hexToBytes())", hex::encode(pk), hex::encode(sig))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     ADMIN_RELINK_TEMPLATE
         .replace("{{uri}}", uri)
         .replace("{{name_hex}}", &hex::encode(name))
         .replace("{{new_pk_hex}}", &hex::encode(new_pk))
         .replace("{{seq}}", &seq.to_string())
         .replace("{{admin_evidence_hex}}", &hex::encode(admin_evidence))
-        .replace("{{sig_hex}}", &hex::encode(sig))
+        .replace("{{admin_sigs}}", &format!("[{admin_sigs}]"))
         .replace("{{new_sig_hex}}", &hex::encode(new_sig))
         .replace("{{reply_slot}}", reply_slot)
 }

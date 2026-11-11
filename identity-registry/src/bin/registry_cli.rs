@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand};
 use rand::RngCore;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use identity_registry::IdentityRegistryClient;
-use identity_registry::payload::{NAME_LEN, NONCE_LEN};
+use identity_registry::payload::{NAME_LEN, NONCE_LEN, PK_LEN};
+use identity_registry::signing::admin_sign;
 use std::env;
 
 const DEFAULT_NODE_HOST: &str = "127.0.0.1";
@@ -59,9 +60,10 @@ enum Command {
         #[arg(long)]
         seq: u64,
     },
-    /// Admin-relink an identity when its current key is compromised. The
-    /// signer must be the registry admin (the genesis
-    /// identity-registry-admin-public-key). Reads F1R3FLY_SIGNING_KEY.
+    /// Admin-relink an identity when its current key is compromised. A
+    /// quorum of distinct registry admins (the genesis
+    /// identity-registry-admin-public-keys) must sign. F1R3FLY_SIGNING_KEY
+    /// only pays for the deploy.
     AdminRelink {
         /// Identity name (32-byte hex).
         #[arg(long)]
@@ -71,6 +73,39 @@ enum Command {
         /// proof the new key holder consents to taking over the identity.
         #[arg(long)]
         new_sk: String,
+
+        /// Expected current seq.
+        #[arg(long)]
+        seq: u64,
+
+        /// Hex-encoded admin evidence recorded verbatim in history.
+        #[arg(long)]
+        evidence: String,
+
+        /// Admin secret key (32-byte hex). Repeat once per signing admin.
+        #[arg(long = "admin-sk")]
+        admin_sks: Vec<String>,
+
+        /// Admin signature from admin-sign, as <admin_pk_hex>:<sig_hex>. Repeat
+        /// once per signing admin. Give at least one --admin-sk or --admin-sig.
+        #[arg(long = "admin-sig")]
+        admin_sigs: Vec<String>,
+    },
+    /// Sign an admin_relink payload with one admin key, offline. Prints
+    /// <admin_pk_hex>:<sig_hex> for admin-relink --admin-sig. Does not
+    /// deploy and does not read F1R3FLY_SIGNING_KEY.
+    AdminSign {
+        /// Admin secret key (32-byte hex).
+        #[arg(long)]
+        admin_sk: String,
+
+        /// Identity name (32-byte hex).
+        #[arg(long)]
+        name: String,
+
+        /// New public key (65-byte uncompressed hex).
+        #[arg(long)]
+        new_pk: String,
 
         /// Expected current seq.
         #[arg(long)]
@@ -108,6 +143,27 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let command = match cli.command {
+        Command::Keygen => {
+            let sk_bytes = random_bytes::<32>();
+            let sk = SecretKey::from_byte_array(sk_bytes)?;
+            let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+            println!("sk: {}", hex::encode(sk_bytes));
+            println!("pk: {}", hex::encode(pk.serialize_uncompressed()));
+            return Ok(());
+        }
+        Command::AdminSign { admin_sk, name, new_pk, seq, evidence } => {
+            let admin_sk = SecretKey::from_byte_array(parse_hex_array::<32>(&admin_sk, "admin_sk")?)?;
+            let name_bytes = parse_hex_array::<NAME_LEN>(&name, "name")?;
+            let new_pk_bytes = parse_hex_array::<PK_LEN>(&new_pk, "new_pk")?;
+            let evidence_bytes = hex::decode(&evidence)?;
+            let (pk, sig) = admin_sign(&admin_sk, &name_bytes, &new_pk_bytes, seq, &evidence_bytes);
+            println!("{}:{}", hex::encode(pk), hex::encode(sig));
+            return Ok(());
+        }
+        command => command,
+    };
+
     let deploy_sk_hex = env::var("F1R3FLY_SIGNING_KEY")
         .map_err(|_| "F1R3FLY_SIGNING_KEY must be set")?;
 
@@ -118,7 +174,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         cli.registry_uri.clone(),
     )?;
 
-    match cli.command {
+    match command {
         Command::Register { sk, nonce } => {
             let sk_bytes = match sk {
                 Some(s) => parse_hex_array::<32>(&s, "sk")?,
@@ -146,15 +202,25 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let new_seq = client.rotate(&current, &name_bytes, &new, seq).await?;
             println!("new_seq: {new_seq}");
         }
-        Command::AdminRelink { name, new_sk, seq, evidence } => {
+        Command::AdminRelink { name, new_sk, seq, evidence, admin_sks, admin_sigs } => {
+            if admin_sks.is_empty() && admin_sigs.is_empty() {
+                return Err("admin-relink needs at least one --admin-sk or --admin-sig".into());
+            }
             let name_bytes = parse_hex_array::<NAME_LEN>(&name, "name")?;
             let new_sk_bytes = parse_hex_array::<32>(&new_sk, "new_sk")?;
             let evidence_bytes = hex::decode(&evidence)?;
-            let admin_sk_bytes = parse_hex_array::<32>(&deploy_sk_hex, "F1R3FLY_SIGNING_KEY")?;
-            let admin_sk = SecretKey::from_byte_array(admin_sk_bytes)?;
             let new = SecretKey::from_byte_array(new_sk_bytes)?;
+            let new_pk_bytes = PublicKey::from_secret_key(&Secp256k1::new(), &new).serialize_uncompressed();
+            let mut pairs = admin_sigs
+                .iter()
+                .map(|s| parse_admin_sig(s))
+                .collect::<Result<Vec<_>, _>>()?;
+            for s in &admin_sks {
+                let sk = SecretKey::from_byte_array(parse_hex_array::<32>(s, "admin_sk")?)?;
+                pairs.push(admin_sign(&sk, &name_bytes, &new_pk_bytes, seq, &evidence_bytes));
+            }
             let new_seq = client
-                .admin_relink(&admin_sk, &name_bytes, &new, seq, &evidence_bytes)
+                .admin_relink_with_sigs(&pairs, &name_bytes, &new, seq, &evidence_bytes)
                 .await?;
             println!("new_seq: {new_seq}");
         }
@@ -175,18 +241,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(ev) = &entry.admin_evidence {
                     println!("  admin_evidence: {}", hex::encode(ev));
                 }
+                for signer in entry.admin_signers.iter().flatten() {
+                    println!("  admin_signer: {}", hex::encode(signer));
+                }
             }
         }
-        Command::Keygen => {
-            let sk_bytes = random_bytes::<32>();
-            let sk = SecretKey::from_byte_array(sk_bytes)?;
-            let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-            println!("sk: {}", hex::encode(sk_bytes));
-            println!("pk: {}", hex::encode(pk.serialize_uncompressed()));
-        }
+        Command::Keygen | Command::AdminSign { .. } => unreachable!(),
     }
 
     Ok(())
+}
+
+fn parse_admin_sig(s: &str) -> Result<([u8; PK_LEN], Vec<u8>), String> {
+    let (pk, sig) = s
+        .split_once(':')
+        .ok_or_else(|| format!("--admin-sig must be <admin_pk_hex>:<sig_hex>, got {s:?}"))?;
+    let pk = parse_hex_array::<PK_LEN>(pk, "--admin-sig pk")?;
+    let sig = hex::decode(sig).map_err(|e| format!("--admin-sig sig is not valid hex: {e}"))?;
+    if sig.is_empty() {
+        return Err(format!("--admin-sig sig is empty in {s:?}"));
+    }
+    Ok((pk, sig))
 }
 
 fn parse_hex_array<const N: usize>(s: &str, label: &str) -> Result<[u8; N], String> {

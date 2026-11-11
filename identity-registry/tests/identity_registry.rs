@@ -3,8 +3,8 @@
 //   - A running F1R3FLY cluster on 127.0.0.1:40422 (gRPC internal)
 //   - F1R3FLY_SIGNING_KEY env var set to a 32-byte hex secp256k1 key with
 //     REV balance on that cluster. The admin relink test also signs with it,
-//     so it must match the genesis identity-registry-admin-public-key (the
-//     docker bootstrap key by default).
+//     so it must be the default 1-of-1 genesis identity registry admin (the
+//     docker bootstrap key).
 //
 // Run with: cargo test --features integration_tests -- --nocapture
 
@@ -17,7 +17,7 @@ use identity_registry::payload::{
     NAME_LEN, NONCE_LEN, derive_name, register_payload,
 };
 use identity_registry::reply::{fetch_reply, parse_tagged_reply};
-use identity_registry::signing::{sign_payload, signature_der, uncompressed_pk_bytes};
+use identity_registry::signing::{admin_sign, sign_payload, signature_der, uncompressed_pk_bytes};
 use identity_registry::term::{new_reply_slot, register_term};
 use std::env;
 use std::sync::OnceLock;
@@ -43,7 +43,7 @@ fn signing_key() -> &'static str {
 const POST_DEPLOY_WAIT: Duration = Duration::from_secs(5);
 
 /// Every test shares the genesis registry but operates on its own fresh
-/// keypair/name so they don't interfere.
+/// keypair/name so they do not interfere.
 async fn test_client() -> IdentityRegistryClient {
     let mut client =
         IdentityRegistryClient::new(signing_key(), NODE_HOST, GRPC_PORT, Some(REGISTRY_URI.into()))
@@ -62,10 +62,16 @@ fn fresh_nonce() -> [u8; NONCE_LEN] {
     buf
 }
 
+/// The default genesis admin set is 1-of-1 over the docker dev bootstrap
+/// key, which is also F1R3FLY_SIGNING_KEY.
 fn admin_sk() -> SecretKey {
     let bytes = hex::decode(signing_key()).expect("F1R3FLY_SIGNING_KEY is not valid hex");
     let arr: [u8; 32] = bytes.try_into().expect("F1R3FLY_SIGNING_KEY must be 32 bytes");
     SecretKey::from_byte_array(arr).expect("F1R3FLY_SIGNING_KEY is not a valid secp256k1 key")
+}
+
+fn admin_pk(sk: &SecretKey) -> [u8; 65] {
+    uncompressed_pk_bytes(&PublicKey::from_secret_key(&Secp256k1::new(), sk))
 }
 
 // --- REG-AC1 -----------------------------------------------------------------
@@ -304,9 +310,9 @@ async fn record_is_append_only() {
 
 // --- REG-AC9 -----------------------------------------------------------------
 
-/// The administrator key can link a new key to an identity whose current
-/// key cannot sign, recording the evidence offered. The same operation
-/// signed by any other key is rejected.
+/// The genesis admin can relink an identity, also with an offline admin_sign
+/// signature. History records the evidence and the signer. A stranger.s
+/// signature is rejected, also under the admin pk.
 #[cfg_attr(not(feature = "integration_tests"), ignore)]
 #[tokio::test]
 async fn admin_relink_works_and_is_bounded() {
@@ -315,13 +321,12 @@ async fn admin_relink_works_and_is_bounded() {
     let nonce = fresh_nonce();
     let name = client.register(&sk1, &nonce).await.expect("register");
 
-    // The genesis-configured key is the admin (REG-D3). Signing with that
-    // key succeeds and records the evidence.
+    // The genesis admin key meets the default 1-of-1 quorum (REG-D3).
     let admin = admin_sk();
     let (sk_new, pk_new) = fresh_keypair();
     let evidence = b"out_of_band_proof".to_vec();
     let new_seq = client
-        .admin_relink(&admin, &name, &sk_new, 0, &evidence)
+        .admin_relink(&[admin], &name, &sk_new, 0, &evidence)
         .await
         .expect("admin relink");
     assert_eq!(new_seq, 1);
@@ -331,15 +336,45 @@ async fn admin_relink_works_and_is_bounded() {
     assert_eq!(history[1].op, "admin_relink");
     assert_eq!(history[1].pk, uncompressed_pk_bytes(&pk_new));
     assert_eq!(history[1].admin_evidence.as_deref(), Some(&evidence[..]));
+    assert_eq!(history[1].admin_signers, Some(vec![admin_pk(&admin)]));
 
-    // Signed by any other key: rejected.
+    // Offline path: the admin signs with admin_sign, and the deploy carries
+    // only the (pk, sig) pair.
+    let (sk_newer, pk_newer) = fresh_keypair();
+    let pair = admin_sign(&admin, &name, &uncompressed_pk_bytes(&pk_newer), 1, b"evidence2");
+    let new_seq = client
+        .admin_relink_with_sigs(&[pair], &name, &sk_newer, 1, b"evidence2")
+        .await
+        .expect("admin relink with offline signature");
+    assert_eq!(new_seq, 2);
+
+    // A stranger's key, and a pair that claims the admin pk but carries a
+    // stranger's signature: both rejected.
     let (sk_stranger, _) = fresh_keypair();
-    let (sk_newer, _pk_newer) = fresh_keypair();
-    let result = client
-        .admin_relink(&sk_stranger, &name, &sk_newer, 1, b"evidence2")
-        .await;
-    assert!(
-        matches!(result, Err(IdentityRegistryError::Rejected(ref r)) if r == "bad_signature"),
-        "expected bad_signature when admin-relinking with a non-admin key, got {result:?}"
-    );
+    let (sk_newest, pk_newest) = fresh_keypair();
+    let (_, stranger_sig) =
+        admin_sign(&sk_stranger, &name, &uncompressed_pk_bytes(&pk_newest), 2, b"evidence3");
+    for (label, result) in [
+        (
+            "stranger key",
+            client.admin_relink(&[sk_stranger], &name, &sk_newest, 2, b"evidence3").await,
+        ),
+        (
+            "admin pk with stranger sig",
+            client
+                .admin_relink_with_sigs(
+                    &[(admin_pk(&admin), stranger_sig)],
+                    &name,
+                    &sk_newest,
+                    2,
+                    b"evidence3",
+                )
+                .await,
+        ),
+    ] {
+        assert!(
+            matches!(result, Err(IdentityRegistryError::Rejected(ref r)) if r == "bad_signature"),
+            "expected bad_signature for {label}, got {result:?}"
+        );
+    }
 }

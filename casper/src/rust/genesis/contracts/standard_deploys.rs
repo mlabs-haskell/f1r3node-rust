@@ -63,7 +63,10 @@ pub const IDENTITY_REGISTRY_PK: &str =
     "b461b0c47b597a5eb9c9e38856533e802954a8e6ed1b6dd3f34e891b4912c8b1";
 // Public key of the docker dev bootstrap key (docker/.env.example). Its private
 // key is published, so this is for defaults and tests only.
-pub const DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEY: &str = "04ffc016579a68050d655d55df4e09f04605164543e257c8e6df10361e6068a5336588e9b355ea859c5ab4285a5ef0efdf62bc28b80320ce99e26bb1607b3ad93d";
+pub const DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEYS: [&str; 1] = [
+    "04ffc016579a68050d655d55df4e09f04605164543e257c8e6df10361e6068a5336588e9b355ea859c5ab4285a5ef0efdf62bc28b80320ce99e26bb1607b3ad93d",
+];
+pub const DEV_IDENTITY_REGISTRY_ADMIN_QUORUM: u32 = 1;
 
 // File I/O FIP fs_generator deploy signing key.  Treat any change as
 // a Genesis hard-fork — alters FS_GENERATOR_PUB_KEY, the FsGenesis
@@ -306,16 +309,24 @@ pub fn token_metadata(
     )
 }
 
-/// Deploys the identity registry and registers it at
-/// `rho:system:identityRegistry`. `admin_public_key` is the hex-encoded
-/// uncompressed secp256k1 key that may sign `admin_relink`.
-pub fn identity_registry(admin_public_key: &str, shard_id: &str) -> Signed<DeployData> {
+/// Deploys the identity registry at `rho:system:identityRegistry`. `quorum`
+/// of the hex `admin_public_keys` must sign `admin_relink`.
+pub fn identity_registry(
+    admin_public_keys: &[String],
+    quorum: u32,
+    shard_id: &str,
+) -> Signed<DeployData> {
+    let keys = ProofOfStake::public_keys(admin_public_keys);
+    let quorum = quorum.to_string();
     to_deploy(
         CompiledRholangTemplate::new(
             "IdentityRegistry.rhox",
             embedded_rho::IDENTITY_REGISTRY,
             HashMap::new(),
-            &[("identityRegistryAdminPublicKey", admin_public_key)],
+            &[
+                ("identityRegistryAdminPublicKeys", &keys),
+                ("identityRegistryAdminQuorum", &quorum),
+            ],
         ),
         IDENTITY_REGISTRY_PK,
         IDENTITY_REGISTRY_TIMESTAMP,

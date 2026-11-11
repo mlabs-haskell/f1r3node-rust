@@ -227,11 +227,15 @@ pub struct GenesisBlockData {
     #[serde(rename = "native-token-decimals")]
     pub native_token_decimals: u32,
 
-    /// Hex-encoded uncompressed secp256k1 public key (65 bytes) of the
-    /// identity registry administrator. Baked into the IdentityRegistry
-    /// contract at genesis. Immutable after genesis.
-    #[serde(rename = "identity-registry-admin-public-key")]
-    pub identity_registry_admin_public_key: String,
+    /// Hex-encoded uncompressed secp256k1 public keys (65 bytes) of the
+    /// identity registry admins. Immutable after genesis.
+    #[serde(rename = "identity-registry-admin-public-keys")]
+    pub identity_registry_admin_public_keys: Vec<String>,
+
+    /// Number of distinct admin signatures that `admin_relink` requires.
+    /// Immutable after genesis.
+    #[serde(rename = "identity-registry-admin-quorum")]
+    pub identity_registry_admin_quorum: u32,
 }
 
 /// Maximum decimal places accepted for native token. Matches the de-facto
@@ -269,19 +273,40 @@ impl GenesisBlockData {
         Ok(())
     }
 
-    /// Validates `identity-registry-admin-public-key`. The value is spliced
-    /// into the genesis Rholang source, so a malformed key must fail startup
-    /// instead of breaking genesis.
+    /// Validates the identity-registry-admin-* fields. They are spliced into
+    /// the genesis Rholang source, so a bad value must fail startup, not genesis.
     pub fn validate_identity_registry_admin(&self) -> Result<(), String> {
-        let key = &self.identity_registry_admin_public_key;
-        match hex::decode(key) {
-            Ok(bytes) if bytes.len() == 65 && bytes[0] == 0x04 => Ok(()),
-            _ => Err(format!(
-                "identity-registry-admin-public-key must be a hex-encoded uncompressed \
-                 secp256k1 public key (65 bytes, 04 prefix); got {:?}",
-                key
-            )),
+        let keys = &self.identity_registry_admin_public_keys;
+        let quorum = self.identity_registry_admin_quorum;
+        if quorum < 1 || quorum as usize > keys.len() {
+            return Err(format!(
+                "identity-registry-admin-quorum must be between 1 and the number of \
+                 identity-registry-admin-public-keys ({}); got {}",
+                keys.len(),
+                quorum
+            ));
         }
+        let mut seen = std::collections::HashSet::new();
+        for key in keys {
+            match hex::decode(key) {
+                Ok(bytes) if bytes.len() == 65 && bytes[0] == 0x04 => {
+                    if !seen.insert(bytes) {
+                        return Err(format!(
+                            "identity-registry-admin-public-keys contains a duplicate key {:?}",
+                            key
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "identity-registry-admin-public-keys entries must be hex-encoded \
+                         uncompressed secp256k1 public keys (65 bytes, 04 prefix); got {:?}",
+                        key
+                    ))
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -531,7 +556,8 @@ mod native_token_validation_tests {
             native_token_name: "F1R3FLY".into(),
             native_token_symbol: "F1R3".into(),
             native_token_decimals: 8,
-            identity_registry_admin_public_key: crate::rust::genesis::contracts::standard_deploys::DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEY.into(),
+            identity_registry_admin_public_keys: crate::rust::genesis::contracts::standard_deploys::DEV_IDENTITY_REGISTRY_ADMIN_PUBLIC_KEYS.map(String::from).to_vec(),
+            identity_registry_admin_quorum: crate::rust::genesis::contracts::standard_deploys::DEV_IDENTITY_REGISTRY_ADMIN_QUORUM,
         }
     }
 
@@ -600,16 +626,40 @@ mod native_token_validation_tests {
         g.validate_native_token().unwrap();
     }
 
+    fn two_of_three_admins() -> GenesisBlockData {
+        let mut g = valid_genesis();
+        g.identity_registry_admin_public_keys = vec![
+            "04ffc016579a68050d655d55df4e09f04605164543e257c8e6df10361e6068a5336588e9b355ea859c5ab4285a5ef0efdf62bc28b80320ce99e26bb1607b3ad93d".into(),
+            "04fa70d7be5eb750e0915c0f6d19e7085d18bb1c22d030feb2a877ca2cd226d04438aa819359c56c720142fbc66e9da03a5ab960a3d8b75363a226b7c800f60420".into(),
+            "04837a4cff833e3157e3135d7b40b8e1f33c6e6b5a4342b9fc784230ca4c4f9d356f258debef56ad4984726d6ab3e7709e1632ef079b4bcd653db00b68b2df065f".into(),
+        ];
+        g.identity_registry_admin_quorum = 2;
+        g
+    }
+
     #[test]
     fn identity_registry_admin_key_validation() {
-        let mut g = valid_genesis();
+        valid_genesis().validate_identity_registry_admin().unwrap();
+        let mut g = two_of_three_admins();
         g.validate_identity_registry_admin().unwrap();
-        let truncated = g.identity_registry_admin_public_key[2..].to_string();
+        let first = g.identity_registry_admin_public_keys[0].clone();
+        let truncated = first[2..].to_string();
         for bad in ["", "zz", &truncated, "02ab"] {
-            g.identity_registry_admin_public_key = bad.into();
+            let mut g = two_of_three_admins();
+            g.identity_registry_admin_public_keys[1] = bad.into();
             assert!(
                 g.validate_identity_registry_admin().is_err(),
                 "accepted {bad:?}"
+            );
+        }
+        g.identity_registry_admin_public_keys[1] = first.to_uppercase();
+        assert!(g.validate_identity_registry_admin().is_err(), "accepted duplicate");
+        for quorum in [0, 4] {
+            let mut g = two_of_three_admins();
+            g.identity_registry_admin_quorum = quorum;
+            assert!(
+                g.validate_identity_registry_admin().is_err(),
+                "accepted quorum {quorum}"
             );
         }
     }
