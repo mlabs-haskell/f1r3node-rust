@@ -21,7 +21,8 @@ new
   deployerId(`rho:rchain:deployerId`),
   secpVerify(`rho:crypto:secp256k1Verify`),
   blake2b256(`rho:crypto:blake2b256Hash`),
-  lookup(`rho:registry:lookup`)
+  lookup(`rho:registry:lookup`),
+  blockData(`rho:block:data`)
 in {
   insertArbitrary!(*identityRegistry, *identityRegistryUri) |
   for (@uri <- identityRegistryUri) {
@@ -47,7 +48,7 @@ in {
     // The identity store. Keyed by name (32-byte ByteArray, == blake2b256(payload_register)).
     // Record shape:
     //   { "current": ByteArray(65),
-    //     "history": [{ "pk": ByteArray(65), "op": String, "seq": Int, "admin_evidence"?: ByteArray }, ...],
+    //     "history": [{ "pk": ByteArray(65), "op": String, "seq": Int, "blockHeight": Int, "admin_evidence"?: ByteArray }, ...],
     //     "seq":     Int
     //   }
     //
@@ -110,15 +111,18 @@ in {
                         registerLock!(Nil) |
                         ret!(("ok", hash))
                       } else {
-                        new ackCh in {
-                          @treeHashMap!("set", identitiesHandle, hash, {
-                            "current": pk,
-                            "history": [{"pk": pk, "op": "register", "seq": 0}],
-                            "seq": 0
-                          }, *ackCh) |
-                          for (_ <- ackCh) {
-                            registerLock!(Nil) |
-                            ret!(("ok", hash))
+                        new ackCh, blockDataCh in {
+                          blockData!(*blockDataCh) |
+                          for (@blockNumber, @_, @_ <- blockDataCh) {
+                            @treeHashMap!("set", identitiesHandle, hash, {
+                              "current": pk,
+                              "history": [{"pk": pk, "op": "register", "seq": 0, "blockHeight": blockNumber}],
+                              "seq": 0
+                            }, *ackCh) |
+                            for (_ <- ackCh) {
+                              registerLock!(Nil) |
+                              ret!(("ok", hash))
+                            }
                           }
                         }
                       }
@@ -177,15 +181,18 @@ in {
                       for (@valid <- verifyCh & @validNew <- verifyNewCh) {
                         match (valid, validNew) {
                           (true, true) => {
-                            new ackCh in {
-                              @treeHashMap!("set", identitiesHandle, name, {
-                                "current": newPk,
-                                "history": rec.get("history") ++
-                                  [{"pk": newPk, "op": "rotate", "seq": seq + 1}],
-                                "seq": seq + 1
-                              }, *ackCh) |
-                              for (_ <- ackCh) {
-                                ret!(("ok", seq + 1))
+                            new ackCh, blockDataCh in {
+                              blockData!(*blockDataCh) |
+                              for (@blockNumber, @_, @_ <- blockDataCh) {
+                                @treeHashMap!("set", identitiesHandle, name, {
+                                  "current": newPk,
+                                  "history": rec.get("history") ++
+                                    [{"pk": newPk, "op": "rotate", "seq": seq + 1, "blockHeight": blockNumber}],
+                                  "seq": seq + 1
+                                }, *ackCh) |
+                                for (_ <- ackCh) {
+                                  ret!(("ok", seq + 1))
+                                }
                               }
                             }
                           }
@@ -251,16 +258,19 @@ in {
                         for (@valid <- verifyCh & @validNew <- verifyNewCh) {
                           match (valid, validNew) {
                             (true, true) => {
-                              new ackCh in {
-                                @treeHashMap!("set", identitiesHandle, name, {
-                                  "current": newPk,
-                                  "history": rec.get("history") ++
-                                    [{"pk": newPk, "op": "admin_relink", "seq": seq + 1,
-                                      "admin_evidence": adminEvidence}],
-                                  "seq": seq + 1
-                                }, *ackCh) |
-                                for (_ <- ackCh) {
-                                  ret!(("ok", seq + 1))
+                              new ackCh, blockDataCh in {
+                                blockData!(*blockDataCh) |
+                                for (@blockNumber, @_, @_ <- blockDataCh) {
+                                  @treeHashMap!("set", identitiesHandle, name, {
+                                    "current": newPk,
+                                    "history": rec.get("history") ++
+                                      [{"pk": newPk, "op": "admin_relink", "seq": seq + 1,
+                                        "blockHeight": blockNumber, "admin_evidence": adminEvidence}],
+                                    "seq": seq + 1
+                                  }, *ackCh) |
+                                  for (_ <- ackCh) {
+                                    ret!(("ok", seq + 1))
+                                  }
                                 }
                               }
                             }
@@ -281,13 +291,12 @@ in {
 
     // resolve_current(name, ret)
     //
-    // Returns the key currently authorised to sign for this identity plus
-    // its sequence number (bundled because a caller building a rotate payload
-    // needs both).
+    // Returns the key currently authorised to sign for this identity, its
+    // sequence number, and the block height at which the name was minted.
     //
     // Responses:
     //   ("err", "unknown_name")
-    //   ("ok", {"pk": ByteArray(65), "seq": Int})
+    //   ("ok", {"pk": ByteArray(65), "seq": Int, "blockHeight": Int})
     contract @[*identityRegistry, "resolve_current"](@name, ret) = {
       for (@(treeHashMap, identitiesHandle) <<- identities) {
         new existingCh in {
@@ -295,7 +304,17 @@ in {
           for (@existing <- existingCh) {
             match existing {
               Nil => ret!(("err", "unknown_name"))
-              rec => ret!(("ok", {"pk": rec.get("current"), "seq": rec.get("seq")}))
+              rec => {
+                // blockHeight is the height of the block that minted the
+                // name, not the height of the most recent rotation.
+                // REG-AC1 asks for the registration height, which lives
+                // on the oldest history entry.
+                ret!(("ok", {
+                  "pk": rec.get("current"),
+                  "seq": rec.get("seq"),
+                  "blockHeight": rec.get("history").nth(0).get("blockHeight")
+                }))
+              }
             }
           }
         }
@@ -310,7 +329,7 @@ in {
     //
     // Responses:
     //   ("err", "unknown_name")
-    //   ("ok", [{"pk", "op", "seq", "admin_evidence"?}, ...])
+    //   ("ok", [{"pk", "op", "seq", "blockHeight", "admin_evidence"?}, ...])
     contract @[*identityRegistry, "resolve_history"](@name, ret) = {
       for (@(treeHashMap, identitiesHandle) <<- identities) {
         new existingCh in {
