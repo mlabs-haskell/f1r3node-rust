@@ -3268,6 +3268,7 @@ dependencies = [
  "secp256k1",
  "thiserror 2.0.19",
  "tokio",
+ "tonic 0.14.6",
  "typenum",
  "uuid",
 ]

@@ -4,10 +4,23 @@
 // envelope.
 
 use crate::error::IdentityRegistryError;
-use models::casper::DataAtNameByBlockQuery;
 use models::casper::v1::deploy_service_client::DeployServiceClient;
 use models::casper::v1::rho_data_response::Message;
+use models::casper::v1::{block_response, deploy_finalization_status_response};
+use models::casper::{
+    BlockInfo, BlockQuery, DataAtNameByBlockQuery, DeployFinalizationStatusInfo,
+    DeployFinalizationStatusQuery,
+};
 use models::rhoapi::{EList, EMap, ETuple, Expr, Par, expr::ExprInstance};
+use tonic::transport::Channel;
+
+pub type DeployClient = DeployServiceClient<Channel>;
+
+pub async fn connect(node_host: &str, grpc_port: u16) -> Result<DeployClient, IdentityRegistryError> {
+    DeployServiceClient::connect(format!("http://{node_host}:{grpc_port}/"))
+        .await
+        .map_err(|e| IdentityRegistryError::Node(format!("connect failed: {e:?}")))
+}
 
 /// Builds the Par that represents the forgeable channel `@"<slot>"`.
 pub fn reply_slot_par(slot: &str) -> Par {
@@ -29,10 +42,16 @@ pub async fn fetch_reply(
     slot: &str,
     block_hash: &str,
 ) -> Result<Par, IdentityRegistryError> {
-    let endpoint = format!("http://{node_host}:{grpc_port}/");
-    let mut client = DeployServiceClient::connect(endpoint)
-        .await
-        .map_err(|e| IdentityRegistryError::Node(format!("connect failed: {e:?}")))?;
+    let mut client = connect(node_host, grpc_port).await?;
+    fetch_reply_with(&mut client, slot, block_hash).await
+}
+
+/// Same as `fetch_reply`, over an existing connection.
+pub async fn fetch_reply_with(
+    client: &mut DeployClient,
+    slot: &str,
+    block_hash: &str,
+) -> Result<Par, IdentityRegistryError> {
     let query = DataAtNameByBlockQuery {
         par: Some(reply_slot_par(slot)),
         block_hash: block_hash.to_owned(),
@@ -60,6 +79,47 @@ pub async fn fetch_reply(
             Ok(payload.par.into_iter().next().unwrap())
         }
         Some(Message::Error(e)) => Err(IdentityRegistryError::Node(format!("{e:?}"))),
+        None => Err(IdentityRegistryError::ResponseParse("empty response".into())),
+    }
+}
+
+/// Queries the node's finalization status for a deploy, keyed by its ID
+/// (the hex deploy signature).
+pub async fn deploy_status(
+    client: &mut DeployClient,
+    deploy_id: &str,
+) -> Result<DeployFinalizationStatusInfo, IdentityRegistryError> {
+    let deploy_sig = hex::decode(deploy_id)
+        .map_err(|e| IdentityRegistryError::Node(format!("deploy id is not hex: {e}")))?;
+    let response = client
+        .deploy_finalization_status(DeployFinalizationStatusQuery { deploy_sig: deploy_sig.into() })
+        .await
+        .map_err(|e| {
+            IdentityRegistryError::Node(format!("deploy_finalization_status failed: {e:?}"))
+        })?
+        .into_inner();
+    match response.message {
+        Some(deploy_finalization_status_response::Message::Status(status)) => Ok(status),
+        Some(deploy_finalization_status_response::Message::Error(e)) => {
+            Err(IdentityRegistryError::Node(format!("{e:?}")))
+        }
+        None => Err(IdentityRegistryError::ResponseParse("empty response".into())),
+    }
+}
+
+/// Fetches a block with its deploy list.
+pub async fn block_info(
+    client: &mut DeployClient,
+    block_hash: &str,
+) -> Result<BlockInfo, IdentityRegistryError> {
+    let response = client
+        .get_block(BlockQuery { hash: block_hash.to_owned() })
+        .await
+        .map_err(|e| IdentityRegistryError::Node(format!("get_block failed: {e:?}")))?
+        .into_inner();
+    match response.message {
+        Some(block_response::Message::BlockInfo(info)) => Ok(info),
+        Some(block_response::Message::Error(e)) => Err(IdentityRegistryError::Node(format!("{e:?}"))),
         None => Err(IdentityRegistryError::ResponseParse("empty response".into())),
     }
 }

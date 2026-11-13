@@ -108,15 +108,7 @@ impl IdentityRegistryClient {
         identity_sk: &SecretKey,
         nonce: &[u8; NONCE_LEN],
     ) -> Result<[u8; NAME_LEN], IdentityRegistryError> {
-        let uri = self.require_uri()?;
-        let pk = PublicKey::from_secret_key(&Secp256k1::new(), identity_sk);
-        let pk_bytes = uncompressed_pk_bytes(&pk);
-        let payload = register_payload(&pk_bytes, nonce);
-        let sig = sign_payload(&payload, identity_sk);
-        let sig_der = signature_der(&sig);
-
-        let slot = new_reply_slot();
-        let term = register_term(uri, &pk_bytes, nonce, &sig_der, &slot);
+        let (term, slot) = self.prepare_register(identity_sk, nonce)?;
         let block_hash = self.deploy(&term).await?;
 
         let value = parse_tagged_reply(
@@ -136,17 +128,7 @@ impl IdentityRegistryClient {
         new_sk: &SecretKey,
         seq: u64,
     ) -> Result<u64, IdentityRegistryError> {
-        let uri = self.require_uri()?;
-        let new_pk = PublicKey::from_secret_key(&Secp256k1::new(), new_sk);
-        let new_pk_bytes = uncompressed_pk_bytes(&new_pk);
-        let payload = rotate_payload(name, &new_pk_bytes, seq);
-        let sig = sign_payload(&payload, current_sk);
-        let sig_der = signature_der(&sig);
-        let new_sig = sign_payload(&payload, new_sk);
-        let new_sig_der = signature_der(&new_sig);
-
-        let slot = new_reply_slot();
-        let term = rotate_term(uri, name, &new_pk_bytes, seq, &sig_der, &new_sig_der, &slot);
+        let (term, slot) = self.prepare_rotate(current_sk, name, new_sk, seq)?;
         let block_hash = self.deploy(&term).await?;
 
         let value = parse_tagged_reply(
@@ -201,9 +183,7 @@ impl IdentityRegistryClient {
         &self,
         name: &[u8; NAME_LEN],
     ) -> Result<ResolvedCurrent, IdentityRegistryError> {
-        let uri = self.require_uri()?;
-        let slot = new_reply_slot();
-        let term = resolve_current_term(uri, name, &slot);
+        let (term, slot) = self.prepare_resolve_current(name)?;
         let block_hash = self.deploy(&term).await?;
 
         let value = parse_tagged_reply(
@@ -231,12 +211,65 @@ impl IdentityRegistryClient {
         decode_history(value)
     }
 
-    pub async fn deploy(&self, term: &str) -> Result<String, IdentityRegistryError> {
+    /// Builds the signed register term and its reply slot without sending it.
+    pub fn prepare_register(
+        &self,
+        identity_sk: &SecretKey,
+        nonce: &[u8; NONCE_LEN],
+    ) -> Result<(String, String), IdentityRegistryError> {
+        let uri = self.require_uri()?;
+        let pk = PublicKey::from_secret_key(&Secp256k1::new(), identity_sk);
+        let pk_bytes = uncompressed_pk_bytes(&pk);
+        let payload = register_payload(&pk_bytes, nonce);
+        let sig_der = signature_der(&sign_payload(&payload, identity_sk));
+        let slot = new_reply_slot();
+        let term = register_term(uri, &pk_bytes, nonce, &sig_der, &slot);
+        Ok((term, slot))
+    }
+
+    /// Builds the signed rotate term and its reply slot without sending it.
+    pub fn prepare_rotate(
+        &self,
+        current_sk: &SecretKey,
+        name: &[u8; NAME_LEN],
+        new_sk: &SecretKey,
+        seq: u64,
+    ) -> Result<(String, String), IdentityRegistryError> {
+        let uri = self.require_uri()?;
+        let new_pk = PublicKey::from_secret_key(&Secp256k1::new(), new_sk);
+        let new_pk_bytes = uncompressed_pk_bytes(&new_pk);
+        let payload = rotate_payload(name, &new_pk_bytes, seq);
+        let sig_der = signature_der(&sign_payload(&payload, current_sk));
+        let new_sig_der = signature_der(&sign_payload(&payload, new_sk));
+        let slot = new_reply_slot();
+        let term = rotate_term(uri, name, &new_pk_bytes, seq, &sig_der, &new_sig_der, &slot);
+        Ok((term, slot))
+    }
+
+    /// Builds the resolve_current term and its reply slot without sending it.
+    pub fn prepare_resolve_current(
+        &self,
+        name: &[u8; NAME_LEN],
+    ) -> Result<(String, String), IdentityRegistryError> {
+        let uri = self.require_uri()?;
+        let slot = new_reply_slot();
+        let term = resolve_current_term(uri, name, &slot);
+        Ok((term, slot))
+    }
+
+    /// Sends a deploy to the node's deploy pool and returns its deploy ID.
+    /// Does not propose: the deploy lands in whichever block the validator
+    /// makes next.
+    pub async fn submit(&self, term: &str) -> Result<String, IdentityRegistryError> {
         let options = DeployOptions::default().with_phlo_limit(5_000_000_000);
         self.api
             .deploy(term, &options)
             .await
-            .map_err(|e| IdentityRegistryError::Node(format!("{e:?}")))?;
+            .map_err(|e| IdentityRegistryError::Node(format!("{e:?}")))
+    }
+
+    pub async fn deploy(&self, term: &str) -> Result<String, IdentityRegistryError> {
+        self.submit(term).await?;
         let propose_result = self
             .api
             .propose()
@@ -285,7 +318,7 @@ fn gint_as_u64(
     Ok(n as u64)
 }
 
-fn decode_resolve_current(
+pub fn decode_resolve_current(
     value: models::rhoapi::Par,
 ) -> Result<ResolvedCurrent, IdentityRegistryError> {
     let map = extract_emap(&value)?;

@@ -1,4 +1,4 @@
-.PHONY: firefly clear-firefly build test deploy \
+.PHONY: firefly clear-firefly build test deploy bench block-cost \
         register rotate admin-relink resolve-current resolve-history keygen
 
 # Spin up a local F1r3fly shard via the workspace's docker compose. Copies
@@ -27,6 +27,24 @@ test:
 
 deploy:
 	cargo run --bin registry_cli -- deploy
+
+# Throughput benchmark. Requires F1R3FLY_SIGNING_KEY and IDENTITY_REGISTRY_URI.
+# Deploys are not proposed by the client: the validator heartbeat makes blocks.
+#
+#   make bench BENCH_ARGS="--scenario register --rate 5 --duration 120"
+#   make bench BENCH_ARGS="--scenario mixed --rate 10 --duration 120 --check --csv mixed.csv"
+#
+# Run the register scenario first to prefill bench-state.txt for mixed.
+bench:
+	cargo run --bin registry_bench -- $(BENCH_ARGS)
+
+# Block cost sweep: time and peak memory of one block of N deploys.
+# WIPES the local shard. See BENCHMARKS.md.
+#
+#   make block-cost
+#   make block-cost BLOCK_COST_ARGS="--yes -s 'noop register' -n '16 32 64'"
+block-cost:
+	./scripts/block-cost.sh $(BLOCK_COST_ARGS)
 
 # Registry CLI targets. All require F1R3FLY_SIGNING_KEY in the environment.
 # All except `deploy` and `keygen` also require IDENTITY_REGISTRY_URI.

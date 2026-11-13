@@ -20,5 +20,6 @@ rand = { workspace = true }
 secp256k1 = { version = "0.31.1", features = ["rand", "serde"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tonic = { workspace = true }
 typenum = "1.16.0"
 uuid = { version = "1", features = ["v4"] }
