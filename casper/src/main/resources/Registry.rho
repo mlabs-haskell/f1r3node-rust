@@ -168,6 +168,26 @@ in {
           }
         } |
 
+        // UNSAFE, test-only: like fastUnsafeGet, but consumes the leaf datum
+        // instead of peeking it, and never restores it. Each call removes one
+        // datum from the key's leaf, so N successful calls prove the leaf held
+        // at least N datums. Hangs once the leaf is empty.
+        contract TreeHashMap(@"unsafeConsume", @map, @key, ret) = {
+          new hashCh, nybListCh, keccak256Hash(`rho:crypto:keccak256Hash`) in {
+            keccak256Hash!(key.toByteArray(), *hashCh) |
+            for (@hash <- hashCh) {
+              for (@depth <<- @(map, *depthP)) {
+                ByteArrayToNybbleList!(hash, 0, depth, [], *nybListCh) |
+                for (@nybList <- nybListCh) {
+                  for (@rest <- @(*bitmaskTag, (map, nybList), *storeToken)) {
+                    ret!(rest.get(key))
+                  }
+                }
+              }
+            }
+          }
+        } |
+
         contract TreeHashMapSetter(@map, @nybList, @n, @len, @newVal, @suffix, ret) = {
           // Look up the value of the node at (map, nybList.slice(0, n + 1))
           new valCh, restCh in {

@@ -1,5 +1,5 @@
 use casper::rust::block_status::ValidBlock;
-use casper::rust::util::construct_deploy;
+use casper::rust::util::{construct_deploy, rspace_util};
 use models::rust::casper::protocol::casper_message::BlockMessage;
 use rspace_plus_plus::rspace::history::Either;
 
@@ -63,8 +63,13 @@ fn assert_no_failed_deploys(block: &BlockMessage) {
 }
 
 /// Two sibling blocks write `key1` and `key2` into one TreeHashMap that already
-/// holds `"k"`. Returns whether each write was rejected in the merge block.
-async fn merge_two_writes(init: &str, key1: &str, key2: &str) -> (bool, bool) {
+/// holds `"k"`. Returns whether each write was rejected in the merge block,
+/// plus the network and the merge block so callers can build on top of it.
+async fn merge_two_writes(
+    init: &str,
+    key1: &str,
+    key2: &str,
+) -> (bool, bool, Vec<TestNode>, BlockMessage) {
     crate::init_logger();
 
     let genesis = GenesisBuilder::new()
@@ -148,13 +153,15 @@ async fn merge_two_writes(init: &str, key1: &str, key2: &str) -> (bool, bool) {
     (
         rejected.contains(&write1.sig),
         rejected.contains(&write2.sig),
+        nodes,
+        merge_block,
     )
 }
 
 /// Both writes consume the same leaf datum, so the merge keeps exactly one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writes_to_the_same_registry_key_reject_exactly_one() {
-    let (write1_rejected, write2_rejected) = merge_two_writes(INIT_MAP, "k", "k").await;
+    let (write1_rejected, write2_rejected, ..) = merge_two_writes(INIT_MAP, "k", "k").await;
     assert!(
         write1_rejected != write2_rejected,
         "write1_rejected={write1_rejected}, write2_rejected={write2_rejected}"
@@ -165,7 +172,7 @@ async fn concurrent_writes_to_the_same_registry_key_reject_exactly_one() {
 /// which BitmaskOr merges, so neither write is rejected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writes_to_different_registry_keys_reject_none() {
-    let (write1_rejected, write2_rejected) = merge_two_writes(INIT_MAP, "a", "b").await;
+    let (write1_rejected, write2_rejected, ..) = merge_two_writes(INIT_MAP, "a", "b").await;
     assert!(
         !write1_rejected && !write2_rejected,
         "write1_rejected={write1_rejected}, write2_rejected={write2_rejected}"
@@ -179,11 +186,58 @@ async fn concurrent_writes_to_different_registry_keys_reject_none() {
 /// single-value overfill guard exempts it too. Expected (correct) behavior is
 /// exactly one rejection, as in the seeded same-key case; the suspected bug is
 /// that neither is rejected and the leaf ends up holding two datums.
+///
+/// A probe block on top of the merge consumes the key's leaf twice in sequence
+/// with the test-only `unsafeConsume`, publishing each value on `@11` and
+/// `@12`. A single leaf datum lets only the first consume fire, so `@12` stays
+/// empty; a second datum shows up as a value on `@12`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_writes_to_the_same_fresh_registry_key_reject_exactly_one() {
-    let (write1_rejected, write2_rejected) = merge_two_writes(INIT_MAP_EMPTY, "a", "a").await;
+async fn concurrent_writes_to_the_same_fresh_registry_key_leave_one_leaf_datum() {
+    let (write1_rejected, write2_rejected, mut nodes, merge_block) =
+        merge_two_writes(INIT_MAP_EMPTY, "a", "a").await;
+
+    let probe = construct_deploy::source_deploy(
+        r#"
+new rl(`rho:registry:lookup`), thmCh, ret1, ret2 in {
+  rl!(`rho:lang:treeHashMap`, *thmCh) |
+  for (thm <- thmCh) {
+    for (@map <<- @"registry-merge-map") {
+      thm!("unsafeConsume", map, "a", *ret1) |
+      for (@v1 <- ret1) {
+        @11!(v1) |
+        thm!("unsafeConsume", map, "a", *ret2) |
+        for (@v2 <- ret2) { @12!(v2) }
+      }
+    }
+  }
+}
+"#
+        .to_string(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 5,
+        Some(5_000_000),
+        None,
+        Some(construct_deploy::DEFAULT_SEC.clone()),
+        None,
+        Some(merge_block.shard_id.clone()),
+    )
+    .unwrap();
+    let probe_block = nodes[0]
+        .add_block_from_deploys(std::slice::from_ref(&probe))
+        .await
+        .expect("validator 0 proposes the probe block");
+    assert_no_failed_deploys(&probe_block);
+
+    let rm = &nodes[0].runtime_manager;
+    let first = rspace_util::get_data_at_public_channel_block(&probe_block, 11, rm).await;
+    let second = rspace_util::get_data_at_public_channel_block(&probe_block, 12, rm).await;
+    assert_eq!(first.len(), 1, "first consume must fire: first={first:?}");
     assert!(
-        write1_rejected != write2_rejected,
-        "same fresh key must reject exactly one: write1_rejected={write1_rejected}, write2_rejected={write2_rejected}"
+        second.is_empty(),
+        "leaf of \"a\" held two datums: consumed {first:?} then {second:?} \
+         (write1_rejected={write1_rejected}, write2_rejected={write2_rejected})"
     );
 }
